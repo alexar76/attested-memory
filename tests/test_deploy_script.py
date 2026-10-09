@@ -1,13 +1,18 @@
 import re
 from pathlib import Path
 
+import pytest
+
 
 def _deploy_script() -> str:
-    return (
+    path = (
         Path(__file__).resolve().parents[3]
         / "scripts"
         / "deploy_attested_memory.sh"
-    ).read_text()
+    )
+    if not path.is_file():
+        pytest.skip("deploy_attested_memory.sh is in the monorepo, not this checkout")
+    return path.read_text()
 
 
 def test_deploy_reloads_persisted_wallet_before_compose() -> None:

@@ -3,12 +3,21 @@ import shutil
 import subprocess
 import sys
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[3]
 
 
+def _read(rel: str) -> str:
+    path = ROOT / rel
+    if not path.is_file():
+        pytest.skip(f"{rel} is in the monorepo, not this checkout")
+    return path.read_text()
+
+
 def test_attested_developer_portal_publishes_mcp_endpoint() -> None:
-    html = (ROOT / "saas-landing/developers.html").read_text()
+    html = _read("saas-landing/developers.html")
 
     assert "https://hub.attestedmemory.net/mcp" in html
     assert 'id="mcp"' in html
@@ -18,7 +27,7 @@ def test_attested_developer_portal_publishes_mcp_endpoint() -> None:
 
 
 def test_hub_terminal_publishes_its_own_origin_mcp_endpoint() -> None:
-    html = (ROOT / "aimarket-hub/terminal-home.html").read_text()
+    html = _read("aimarket-hub/terminal-home.html")
 
     assert "`${HUB}/mcp`" in html
     assert 'id="mcp-copy"' in html
@@ -28,8 +37,12 @@ def test_hub_terminal_publishes_its_own_origin_mcp_endpoint() -> None:
 def test_attested_nav_rewrite_preserves_mcp_and_is_idempotent(tmp_path: Path) -> None:
     script = tmp_path / "rewrite_terminal_nav.py"
     terminal = tmp_path / "terminal-home.html"
-    shutil.copy(ROOT / "attested/attested-memory-hub/hub/rewrite_terminal_nav.py", script)
-    shutil.copy(ROOT / "aimarket-hub/terminal-home.html", terminal)
+    nav = ROOT / "attested/attested-memory-hub/hub/rewrite_terminal_nav.py"
+    home = ROOT / "aimarket-hub/terminal-home.html"
+    if not nav.is_file() or not home.is_file():
+        pytest.skip("terminal nav sources are in the monorepo, not this checkout")
+    shutil.copy(nav, script)
+    shutil.copy(home, terminal)
 
     subprocess.run([sys.executable, str(script)], check=True)
     first = terminal.read_text()
@@ -45,8 +58,8 @@ def test_attested_nav_rewrite_preserves_mcp_and_is_idempotent(tmp_path: Path) ->
 
 
 def test_independent_portal_publishes_mcp_endpoint() -> None:
-    html = (ROOT / "independent/landing/public/index.html").read_text()
-    javascript = (ROOT / "independent/landing/public/portal.js").read_text()
+    html = _read("independent/landing/public/index.html")
+    javascript = _read("independent/landing/public/portal.js")
     endpoint = "https://independentai.network/hub/mcp"
 
     assert endpoint in html
