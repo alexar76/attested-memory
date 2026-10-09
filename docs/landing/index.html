@@ -30,6 +30,7 @@
   nav{display:flex;gap:16px;flex-wrap:wrap;font-size:.9rem}
   nav a{color:var(--dim)}
   section{padding:56px 0;border-bottom:1px solid var(--line)}
+  .banner{width:100%;height:auto;display:block;margin:8px 0 28px;border-radius:16px;border:1px solid var(--line)}
   h1{font-size:clamp(2rem,5vw,3.1rem);line-height:1.12;margin:.15em 0 .4em;letter-spacing:-.02em}
   h2{font-size:1.45rem;margin:0 0 .4em}
   .kicker{font-family:var(--mono);font-size:.76rem;letter-spacing:.18em;color:var(--teal);text-transform:uppercase}
@@ -61,13 +62,14 @@
 </header>
 <main>
   <section class="wrap" id="hero">
+    <img class="banner" src="hero.svg" width="1200" height="420" alt="Attested Memory — Memory Market, Truth Layer and Provenance Ledger around one Memory Unit contract">
     <p class="kicker">GitHub Pages landing · AIMarket ecosystem</p>
     <h1>Memory, with proof.</h1>
     <p class="lede">Every memory carries identity, truth state and provenance, so an agent can check it before acting on it. A forged memory fails its signature. A contradicted one is flagged.</p>
     <div class="cta">
       <a class="btn" href="https://github.com/alexar76/attested-memory">Source</a>
       <a class="btn alt" href="https://attestedmemory.net/">attestedmemory.net</a>
-      <a class="btn alt" href="https://pypi.org/project/attested-memory/">PyPI package</a>
+      <a class="btn alt" href="https://github.com/alexar76/attested-memory/tree/main/clients/python">Python client</a>
     </div>
   </section>
   <section class="wrap" id="services">
@@ -93,10 +95,11 @@
   <section class="wrap" id="package">
     <h2>Package</h2>
     <p>The Python client signs each call with your Ed25519 actor key. The private key stays on your machine. The client checks a memory it reads against the <code>content_hash</code> the hub recorded.</p>
-    <pre><code>pip install attested-memory
+    <pre><code>cd clients/python
+pip install .
 attested-memory init
 attested-memory write "Supplier terms" "Net 30, EUR"</code></pre>
-    <p>Source of the package: <a href="https://github.com/alexar76/attested-memory/tree/main/clients/python">clients/python</a>. Self-host the hub with Docker Compose: <a href="https://github.com/alexar76/attested-memory/blob/main/README.md">README</a>.</p>
+    <p>Source of the package: <a href="https://github.com/alexar76/attested-memory/tree/main/clients/python">clients/python</a> (Python &gt;=3.9). Self-host the hub with Docker Compose: <a href="https://github.com/alexar76/attested-memory/blob/main/README.md">README</a>.</p>
   </section>
 </main>
 <footer class="wrap">
