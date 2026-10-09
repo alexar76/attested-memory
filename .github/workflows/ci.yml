@@ -24,7 +24,7 @@ jobs:
       - name: Install services and the client
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e memory-market -e truth-layer -e provenance-ledger -e clients/python
+          python -m pip install -e "memory-market[dev]" -e "truth-layer[dev]" -e "provenance-ledger[dev]" -e "clients/python[dev]"
       - name: Service and contract tests
         run: |
           python -m pytest -q memory-market/tests truth-layer/tests provenance-ledger/tests tests
