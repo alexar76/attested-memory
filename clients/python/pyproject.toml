@@ -1,0 +1,33 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "attested-memory"
+version = "0.1.0"
+description = "Client and CLI for Attested Memory: write, search and read verifiable AI-agent memory under a signed Ed25519 actor identity."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "Apache-2.0"
+authors = [{ name = "AIMarket" }]
+keywords = ["ai-agents", "agent-memory", "provenance", "verifiable", "ed25519", "memory-poisoning"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: Apache Software License",
+  "Topic :: Security :: Cryptography",
+  "Intended Audience :: Developers",
+]
+dependencies = ["cryptography>=41"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.urls]
+Homepage = "https://attestedmemory.net/"
+Source = "https://github.com/alexar76/attested-memory"
+
+[project.scripts]
+attested-memory = "attested_memory.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/attested_memory"]

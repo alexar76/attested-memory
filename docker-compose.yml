@@ -1,0 +1,286 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-aicom}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-aicom}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    # Official postgres entrypoint must setuid on first boot; no-new-privileges
+    # + cap_drop ALL breaks fresh volumes (Operation not permitted).
+    restart: unless-stopped
+
+  hub:
+    build:
+      context: .
+      dockerfile: hub/Dockerfile
+    environment:
+      AIMARKET_HUB_NAME: Attested Memory Hub
+      AIMARKET_HUB_URL: ${AIMARKET_PUBLIC_HUB_URL:-http://localhost:9084}
+      AIMARKET_DB_PATH: /data/hub.db
+      DATABASE_URL: postgresql://${POSTGRES_USER:-aicom}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-aicom}
+      AIMARKET_CHANNELS_DATABASE_URL: postgresql://${POSTGRES_USER:-aicom}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-aicom}
+      AIMARKET_SANDBOX_DATABASE_URL: postgresql://${POSTGRES_USER:-aicom}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-aicom}
+      AIMARKET_ACEX_IPO_DATABASE_URL: postgresql://${POSTGRES_USER:-aicom}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-aicom}
+      AIMARKET_ACEX_AUDIT_DATABASE_URL: postgresql://${POSTGRES_USER:-aicom}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-aicom}
+      AIMARKET_ZK_DATABASE_URL: postgresql://${POSTGRES_USER:-aicom}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-aicom}
+      AIMARKET_ESCROW_DATABASE_URL: postgresql://${POSTGRES_USER:-aicom}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-aicom}
+      AIFACTORY_DATABASE_URL: postgresql://${POSTGRES_USER:-aicom}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-aicom}
+      AIFACTORY_PROD: "1"
+      AIMARKET_CAPABILITY_TOKEN: ${AIMARKET_CAPABILITY_TOKEN:?run ./start.sh}
+      AIMARKET_CHANNELS_DB_PATH: /data/channels.db
+      AIMARKET_VERIFY_SETTLEMENTS_DB_PATH: /data/hub.db
+      AIMARKET_SANDBOX_DB_PATH: /data/sandbox-trials.db
+      ACEX_IPO_DB_PATH: /data/acex-ipo.db
+      ACEX_AUDIT_DB_PATH: /data/acex-audit.db
+      AIMARKET_SIGNING_KEY_PATH: /data/hub-signing-key
+      AIMARKET_ADMIN_TOKEN: ${AIMARKET_ADMIN_TOKEN:?run ./start.sh to generate secrets}
+      AIMARKET_PUBLISHER_TOKENS: memory-market:${MEMORY_MARKET_PUBLISHER_TOKEN:?run ./start.sh},truth-layer:${TRUTH_LAYER_PUBLISHER_TOKEN:?run ./start.sh},provenance-ledger:${PROVENANCE_PUBLISHER_TOKEN:?run ./start.sh},attested-deal:${ATTESTED_DEAL_PUBLISHER_TOKEN:?run ./start.sh},attested-meter:${ATTESTED_METER_PUBLISHER_TOKEN:?run ./start.sh},attested-prove:${ATTESTED_PROVE_PUBLISHER_TOKEN:?run ./start.sh}
+      AIMARKET_ECOSYSTEM_LABELS: memory-market:Memory Market,truth-layer:Truth Layer,provenance-ledger:Provenance Ledger,attested-deal:Attested Deal,attested-meter:Attested Meter,attested-prove:Attested Prove
+      # …and WHERE they are. There was a way to set their names and no way to set their
+      # addresses, so this hub published `http://memory-market:8810` and every monitor
+      # drew three nodes with no usable link. `=` separates because the value is a URL.
+      # Where each provider can be REACHED from outside. Empty means the monitor
+      # publishes the compose hostname this hub dials, which is useless to everyone
+      # else. `=` separates because the value is a URL and contains colons.
+      AIMARKET_ECOSYSTEM_URLS: ${AIMARKET_ECOSYSTEM_URLS:-memory-market=https://memory.attestedmemory.net,truth-layer=https://truth.attestedmemory.net,provenance-ledger=https://provenance.attestedmemory.net}
+      AIMARKET_ALLOW_LOCAL_PUBLISH: "1"
+      AIMARKET_INVOKE_HOST_GATEWAY: memory-market,truth-layer,provenance-ledger
+      AIMARKET_SUPPLY_SECURITY_RELAXED: "0"
+      # The operator's own first-party providers, exempt from the $25 supply stake.
+      # The gate stays ON for everyone else: this list is not a way around it, it is
+      # the statement that these services are the operator, on the operator's host.
+      AIMARKET_SUPPLY_OPERATOR_PUBLISHERS: memory-market,truth-layer,provenance-ledger,attested-deal,attested-meter,attested-prove
+      AIMARKET_SUPPLY_REQUIRE_RESPONSE_SIG: "1"
+      AIMARKET_SUPPLY_PUBLISH_PER_HOUR: "50"
+      AIMARKET_ORACLE_FAMILY_URL: off
+      AIMARKET_FEDERATION_OPEN: "0"
+      # Sandbox assay + MiniMax judge → auto-admit pass (same fleet rail as Independent).
+      AIMARKET_FEDERATION_ASSAY: "1"
+      AIMARKET_FEDERATION_ASSAY_SANDBOX: "1"
+      AIMARKET_FEDERATION_AUTO_ADMIT: "1"
+      AIMARKET_FEDERATION_ASSAY_REQUIRE: ${AIMARKET_FEDERATION_ASSAY_REQUIRE:-1}
+      AIMARKET_FEDERATION_JUDGE_URL: ${AIMARKET_FEDERATION_JUDGE_URL:-https://openrouter.ai/api/v1/chat/completions}
+      AIMARKET_FEDERATION_JUDGE_MODEL: ${AIMARKET_FEDERATION_JUDGE_MODEL:-minimax/minimax-m3}
+      AIMARKET_FEDERATION_JUDGE_KEY: ${AIMARKET_FEDERATION_JUDGE_KEY:-}
+      AIMARKET_AUTO_CRAWL: "1"
+      # Production requires hybrid verification. Classical-only peers are rejected;
+      # do not weaken this globally to admit a peer that has not completed migration.
+      AIMARKET_PQC: "1"
+      AIMARKET_PQC_REQUIRE: "1"
+      AIMARKET_TEAM_AUTH_SECRET: ${SAAS_TEAM_AUTH_SECRET:?set the same team assertion secret used by SaaS Gateway}
+      AIMARKET_CREDITS_ENABLED: "1"
+      AIMARKET_CREDITS_OPEN_SIGNUP: "1"
+      AIMARKET_CREDITS_FREE_GRANT_USD: "0"
+      # USDC top-ups of credit accounts (docs/credits-topup.md): the buyer pays the hub's own
+      # wallet (PAYMENT_RECIPIENT) and the credit lands on the quoted account. Off unless set.
+      AIMARKET_TOPUP_ENABLED: ${TOPUP_ENABLED:-0}
+      # A wallet that receives top-ups and nothing else. Set, the hub watches it and credits every
+      # deposit itself (quote payments; plain transfers from linked wallets); unset, top-ups go to
+      # PAYMENT_RECIPIENT and each must be presented. Address only — the hub never needs its key.
+      AIMARKET_TOPUP_PAY_TO: ${TOPUP_PAY_TO:-}
+      # Credit keys this hub holds at peer hubs ("url=key,..."), so a subcontracting job here
+      # can pay their capabilities from its allowance (docs/subcontracting.md). Secret: .env only.
+      AIMARKET_PEER_API_KEYS: ${PEER_API_KEYS:-}
+      AIMARKET_PAYMENT_RECIPIENT: ${PAYMENT_RECIPIENT:-}
+      AIMARKET_PAYMENT_CHAIN: base
+      AIMARKET_X402_PAY_TO: ${PAYMENT_RECIPIENT:-}
+      AIFACTORY_CRYPTO_ENABLED: ${AIFACTORY_CRYPTO_ENABLED:-0}
+      AIFACTORY_PAYMENT_TESTNET: "0"
+      AIFACTORY_PAYMENT_VERIFY_STUB: "0"
+    ports:
+      - "127.0.0.1:${AIMARKET_HUB_PORT:-9084}:9083"
+    volumes:
+      - hub-data:/data
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=32m"]
+    restart: unless-stopped
+
+  federation-bootstrap:
+    build:
+      context: .
+      dockerfile: hub/Dockerfile
+    entrypoint: ["python", "/app/federation_bootstrap.py"]
+    environment:
+      AIMARKET_PUBLIC_HUB_URL: ${AIMARKET_PUBLIC_HUB_URL:-http://localhost:9084}
+      AIMARKET_BOOTSTRAP_LOCAL_URL: http://hub:9083
+      AIMARKET_BOOTSTRAP_HUB_URLS: ${AIMARKET_BOOTSTRAP_HUB_URLS:-https://modelmarket.dev,https://independentai.network/hub}
+      AIMARKET_BOOTSTRAP_RETRY_MIN_S: "30"
+      AIMARKET_BOOTSTRAP_RETRY_MAX_S: "3600"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      hub:
+        condition: service_healthy
+      memory-market:
+        condition: service_healthy
+      truth-layer:
+        condition: service_healthy
+      provenance-ledger:
+        condition: service_healthy
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=8m"]
+    restart: on-failure
+
+  memory-market:
+    build: ./memory-market
+    environment:
+      MEMORY_MARKET_DB: /data/memory-market.sqlite3
+      MEMORY_MARKET_DATABASE_URL: postgresql://${POSTGRES_USER:-aicom}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-aicom}
+      AIFACTORY_PROD: "1"
+      AIMARKET_CAPABILITY_TOKEN: ${AIMARKET_CAPABILITY_TOKEN:?run ./start.sh}
+      MEMORY_MARKET_STATIC_DIR: /app/static
+      MEMORY_MARKET_API_KEY: ${MEMORY_MARKET_API_KEY:?run ./start.sh}
+      PROVENANCE_LEDGER_URL: http://provenance-ledger:8812
+      PROVENANCE_ADMIN_TOKEN: ${PROVENANCE_ADMIN_TOKEN:?run ./start.sh}
+      TRUTH_LAYER_URL: http://truth-layer:8811
+      AIMARKET_HUB_URL: http://hub:9083
+      AIMARKET_PUBLISHER_TOKEN: ${MEMORY_MARKET_PUBLISHER_TOKEN:?run ./start.sh}
+      # Where the hub DIALS this service (container network) — never a public address,
+      # or every paid hub->provider call would leave through nginx and come back.
+      AIMARKET_INVOKE_BASE: http://memory-market:8810
+      # Where this service can be REACHED, for its own well-known. Unset, it falls
+      # back to the invoke base above — which is how every reader of memory-market's
+      # manifest_url used to be handed a container hostname.
+      AIMARKET_PUBLIC_BASE: ${MEMORY_MARKET_PUBLIC_URL:-}
+      AIMARKET_PUBLISHER_ID: memory-market
+      AIMARKET_BOOTSTRAP_HUB_URLS: ${AIMARKET_BOOTSTRAP_HUB_URLS:-https://modelmarket.dev,https://independentai.network/hub}
+      PROVIDER_SIGNING_KEY_FILE: /data/provider-signing-key.pem
+      ATTESTED_PQC_ENABLED: "1"
+      ATTESTED_PQC_REQUIRE: "1"
+      AIMARKET_TEAM_AUTH_SECRET: ${SAAS_TEAM_AUTH_SECRET:?set the same team assertion secret used by SaaS Gateway}
+      PAYMENT_RECIPIENT: ${PAYMENT_RECIPIENT:-}
+      PAYMENT_CHAIN_ID: ${PAYMENT_CHAIN_ID:-8453}
+      PAYMENT_ASSET: ${PAYMENT_ASSET:-USDC}
+      PAYMENT_USDC_ADDRESS: ${PAYMENT_USDC_ADDRESS:-0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913}
+      PAYMENT_BASE_RPC_URLS: ${PAYMENT_BASE_RPC_URLS:-https://mainnet.base.org,https://base.drpc.org,https://gateway.tenderly.co/public/base,https://base-mainnet.public.blastapi.io}
+      PAYMENT_MIN_CONFIRMATIONS: ${PAYMENT_MIN_CONFIRMATIONS:-5}
+      PAYMENT_ORDER_TTL_MINUTES: ${PAYMENT_ORDER_TTL_MINUTES:-60}
+      PAYMENT_LATE_GRACE_HOURS: ${PAYMENT_LATE_GRACE_HOURS:-24}
+      PAYMENT_POLL_SECONDS: ${PAYMENT_POLL_SECONDS:-20}
+      PAYMENT_LOG_SCAN_BLOCKS: ${PAYMENT_LOG_SCAN_BLOCKS:-40}
+      PAYMENT_EXPLORER_URL: ${PAYMENT_EXPLORER_URL:-https://basescan.org}
+    ports:
+      - "127.0.0.1:${MEMORY_MARKET_PORT:-8810}:8810"
+    volumes:
+      - memory-market-data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      hub:
+        condition: service_healthy
+      provenance-ledger:
+        condition: service_healthy
+      truth-layer:
+        condition: service_healthy
+    restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=32m"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8810/healthz')"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  truth-layer:
+    build: ./truth-layer
+    environment:
+      TRUTH_LAYER_DB: /data/truth-layer.sqlite3
+      TRUTH_LAYER_DATABASE_URL: postgresql://${POSTGRES_USER:-aicom}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-aicom}
+      AIFACTORY_PROD: "1"
+      AIMARKET_CAPABILITY_TOKEN: ${AIMARKET_CAPABILITY_TOKEN:?run ./start.sh}
+      AIMARKET_HUB_URL: http://hub:9083
+      AIMARKET_PUBLISHER_TOKEN: ${TRUTH_LAYER_PUBLISHER_TOKEN:?run ./start.sh}
+      # Where the hub DIALS this service (container network) — never a public address,
+      # or every paid hub->provider call would leave through nginx and come back.
+      AIMARKET_INVOKE_BASE: http://truth-layer:8811
+      # Where this service can be REACHED, for its own well-known. Unset, it falls
+      # back to the invoke base above — which is how every reader of truth-layer's
+      # manifest_url used to be handed a container hostname.
+      AIMARKET_PUBLIC_BASE: ${TRUTH_LAYER_PUBLIC_URL:-}
+      AIMARKET_PUBLISHER_ID: truth-layer
+      # Per-call USDC buyers pay Attested's own wallet (the hub's x402 rail); credits work without it.
+      AIMARKET_PAYOUT_ADDRESS: ${PAYMENT_RECIPIENT:-}
+      PROVIDER_SIGNING_KEY_FILE: /data/provider-signing-key.pem
+      ATTESTED_PQC_ENABLED: "1"
+      ATTESTED_PQC_REQUIRE: "1"
+    ports:
+      - "127.0.0.1:${TRUTH_LAYER_PORT:-8811}:8811"
+    volumes:
+      - truth-layer-data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      hub:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8811/healthz')"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=16m"]
+
+  provenance-ledger:
+    build: ./provenance-ledger
+    environment:
+      PROVENANCE_LEDGER_DB: /data/provenance-ledger.sqlite3
+      PROVENANCE_LEDGER_DATABASE_URL: postgresql://${POSTGRES_USER:-aicom}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-aicom}
+      AIFACTORY_PROD: "1"
+      AIMARKET_CAPABILITY_TOKEN: ${AIMARKET_CAPABILITY_TOKEN:?run ./start.sh}
+      PROVENANCE_KEY_FILE: /data/signing-key.pem
+      PROVENANCE_ADMIN_TOKEN: ${PROVENANCE_ADMIN_TOKEN:?run ./start.sh}
+      AIMARKET_HUB_URL: http://hub:9083
+      AIMARKET_PUBLISHER_TOKEN: ${PROVENANCE_PUBLISHER_TOKEN:?run ./start.sh}
+      # Where the hub DIALS this service (container network) — never a public address,
+      # or every paid hub->provider call would leave through nginx and come back.
+      AIMARKET_INVOKE_BASE: http://provenance-ledger:8812
+      # Where this service can be REACHED, for its own well-known. Unset, it falls
+      # back to the invoke base above — which is how every reader of provenance-ledger's
+      # manifest_url used to be handed a container hostname.
+      AIMARKET_PUBLIC_BASE: ${PROVENANCE_LEDGER_PUBLIC_URL:-}
+      AIMARKET_PUBLISHER_ID: provenance-ledger
+      PROVIDER_SIGNING_KEY_FILE: /data/provider-signing-key.pem
+      ATTESTED_PQC_ENABLED: "1"
+      ATTESTED_PQC_REQUIRE: "1"
+    ports:
+      - "127.0.0.1:${PROVENANCE_LEDGER_PORT:-8812}:8812"
+    volumes:
+      - provenance-ledger-data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      hub:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8812/healthz')"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=16m"]
+
+volumes:
+  postgres-data:
+  hub-data:
+  memory-market-data:
+  truth-layer-data:
+  provenance-ledger-data:

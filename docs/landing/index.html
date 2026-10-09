@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Attested Memory — verifiable memory for AI agents</title>
+<meta name="description" content="Attested Memory stores agent memory that can prove where it came from. Memory Market, Truth Layer and Provenance Ledger share one Memory Unit contract. A forged memory fails its signature."/>
+<meta name="color-scheme" content="dark"/>
+<link rel="canonical" href="https://alexar76.github.io/attested-memory/"/>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23071018'/%3E%3Cpath d='M8 16h16M16 8v16' stroke='%232bb8a8' stroke-width='2'/%3E%3Ccircle cx='16' cy='16' r='3' fill='%237dd3c7'/%3E%3C/svg%3E"/>
+<style>
+  :root{
+    --bg:#071018; --bg2:#0c1824; --line:#1b2c3a; --ink:#e6f1f5; --dim:#93a9ba;
+    --teal:#2bb8a8; --teal2:#7dd3c7;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:
+      radial-gradient(60% 40% at 12% 0%,rgba(43,184,168,.13),transparent 70%),
+      linear-gradient(165deg,var(--bg) 0%,var(--bg2) 55%,var(--bg) 100%);
+    color:var(--ink);font-family:var(--sans);line-height:1.62}
+  a{color:var(--teal2);text-decoration:none}
+  a:hover{text-decoration:underline}
+  .wrap{max-width:960px;margin:0 auto;padding:0 22px}
+  header{position:sticky;top:0;z-index:2;backdrop-filter:blur(10px);
+    background:rgba(7,16,24,.82);border-bottom:1px solid var(--line)}
+  .bar{display:flex;align-items:center;gap:18px;padding:14px 0;flex-wrap:wrap}
+  .brand{font-family:var(--mono);letter-spacing:.14em;font-weight:600}
+  nav{display:flex;gap:16px;flex-wrap:wrap;font-size:.9rem}
+  nav a{color:var(--dim)}
+  section{padding:56px 0;border-bottom:1px solid var(--line)}
+  h1{font-size:clamp(2rem,5vw,3.1rem);line-height:1.12;margin:.15em 0 .4em;letter-spacing:-.02em}
+  h2{font-size:1.45rem;margin:0 0 .4em}
+  .kicker{font-family:var(--mono);font-size:.76rem;letter-spacing:.18em;color:var(--teal);text-transform:uppercase}
+  .lede{font-size:1.12rem;color:var(--dim);max-width:62ch}
+  .cta{display:flex;gap:12px;flex-wrap:wrap;margin:22px 0 0}
+  .btn{display:inline-block;padding:10px 16px;border-radius:8px;border:1px solid var(--teal);color:var(--bg);background:var(--teal2);font-weight:600}
+  .btn.alt{background:transparent;color:var(--teal2)}
+  .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+  .card{border:1px solid var(--line);border-radius:12px;padding:16px 16px 8px;background:rgba(11,21,30,.7)}
+  .card b{font-family:var(--mono);font-size:.72rem;letter-spacing:.12em;color:var(--teal)}
+  code{font-family:var(--mono);font-size:.92em}
+  pre{background:#0b151e;border:1px solid var(--line);border-radius:10px;padding:14px 16px;overflow:auto}
+  footer{padding:28px 0 48px;color:var(--dim);font-size:.9rem}
+  @media (max-width:800px){ .grid{grid-template-columns:1fr} }
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap bar">
+    <div class="brand">ATTESTED MEMORY</div>
+    <nav>
+      <a href="#hero">Overview</a>
+      <a href="#services">Services</a>
+      <a href="#package">Package</a>
+      <a href="https://attestedmemory.net/">Live site</a>
+      <a href="https://github.com/alexar76/attested-memory">GitHub</a>
+    </nav>
+  </div>
+</header>
+<main>
+  <section class="wrap" id="hero">
+    <p class="kicker">GitHub Pages landing · AIMarket ecosystem</p>
+    <h1>Memory, with proof.</h1>
+    <p class="lede">Every memory carries identity, truth state and provenance, so an agent can check it before acting on it. A forged memory fails its signature. A contradicted one is flagged.</p>
+    <div class="cta">
+      <a class="btn" href="https://github.com/alexar76/attested-memory">Source</a>
+      <a class="btn alt" href="https://attestedmemory.net/">attestedmemory.net</a>
+      <a class="btn alt" href="https://pypi.org/project/attested-memory/">PyPI package</a>
+    </div>
+  </section>
+  <section class="wrap" id="services">
+    <h2>Three services, one contract</h2>
+    <div class="grid">
+      <article class="card">
+        <b>01 · MARKET</b>
+        <h3>Memory Market</h3>
+        <p>Write, search, share and price a portable memory. The product wedge.</p>
+      </article>
+      <article class="card">
+        <b>02 · TRUTH</b>
+        <h3>Truth Layer</h3>
+        <p>Evidence and contradictions. A contested memory is visible before an agent uses it.</p>
+      </article>
+      <article class="card">
+        <b>03 · LINEAGE</b>
+        <h3>Provenance Ledger</h3>
+        <p>Append-only lineage and hybrid-signed receipts an agent can verify.</p>
+      </article>
+    </div>
+  </section>
+  <section class="wrap" id="package">
+    <h2>Package</h2>
+    <p>The Python client signs each call with your Ed25519 actor key. The private key stays on your machine. The client checks a memory it reads against the <code>content_hash</code> the hub recorded.</p>
+    <pre><code>pip install attested-memory
+attested-memory init
+attested-memory write "Supplier terms" "Net 30, EUR"</code></pre>
+    <p>Source of the package: <a href="https://github.com/alexar76/attested-memory/tree/main/clients/python">clients/python</a>. Self-host the hub with Docker Compose: <a href="https://github.com/alexar76/attested-memory/blob/main/README.md">README</a>.</p>
+  </section>
+</main>
+<footer class="wrap">
+  <p>Attested Memory is part of the open <a href="https://modelmarket.dev/">AIMarket</a> ecosystem. This page is the GitHub Pages landing for <a href="https://github.com/alexar76/attested-memory">alexar76/attested-memory</a>. The production site is <a href="https://attestedmemory.net/">attestedmemory.net</a>.</p>
+</footer>
+</body>
+</html>

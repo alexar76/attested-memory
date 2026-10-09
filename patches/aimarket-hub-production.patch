@@ -1,0 +1,1275 @@
+diff --git a/aimarket_hub/acex_audit.py b/aimarket_hub/acex_audit.py
+index 123daae..e58c0ca 100644
+--- a/aimarket_hub/acex_audit.py
++++ b/aimarket_hub/acex_audit.py
+@@ -18,6 +18,7 @@ import threading
+ import time
+ from pathlib import Path
+ from typing import Any
++from aimarket_hub.storage import service_backend, service_database_url
+ 
+ _MICRO = 1_000_000
+ _DEFAULT_AUDIT_FEE_BPS = int(os.getenv("ACEX_AUDIT_FEE_BPS", "100"))
+@@ -69,14 +70,14 @@ def _default_risk(
+ class AcexAuditLedger:
+     def __init__(self, db_path: str = "") -> None:
+         self._path = Path(db_path or _DB_PATH)
+-        self._path.parent.mkdir(parents=True, exist_ok=True)
++        if not service_database_url("AIMARKET_ACEX_AUDIT_DATABASE_URL"):
++            self._path.parent.mkdir(parents=True, exist_ok=True)
++        self._backend = service_backend(self._path, "AIMARKET_ACEX_AUDIT_DATABASE_URL")
+         self._lock = threading.RLock()
+         self._init_db()
+ 
+-    def _connect(self) -> sqlite3.Connection:
+-        conn = sqlite3.connect(self._path)
+-        conn.row_factory = sqlite3.Row
+-        return conn
++    def _connect(self):
++        return self._backend.get_connection()
+ 
+     def _init_db(self) -> None:
+         with self._lock, self._connect() as conn:
+diff --git a/aimarket_hub/acex_ipo.py b/aimarket_hub/acex_ipo.py
+index 82a4a1f..3748ca9 100644
+--- a/aimarket_hub/acex_ipo.py
++++ b/aimarket_hub/acex_ipo.py
+@@ -35,6 +35,7 @@ import time
+ import uuid
+ from pathlib import Path
+ from typing import Any
++from aimarket_hub.storage import service_backend, service_database_url
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -86,8 +87,11 @@ def _resolve_db_path(db_path: str = "") -> Path:
+     raw = (db_path or _DB_PATH or "data/acex_ipo.db").strip()
+     p = Path(raw).expanduser()
+     p = p.resolve() if p.is_absolute() else (_data_root() / p).resolve()
+-    p.parent.mkdir(parents=True, exist_ok=True)
+-    logger.info("ACEX IPO ledger using SQLite DB at %s", p)
++    if not service_database_url("AIMARKET_ACEX_IPO_DATABASE_URL"):
++        p.parent.mkdir(parents=True, exist_ok=True)
++        logger.info("ACEX IPO ledger using SQLite DB at %s", p)
++    else:
++        logger.info("ACEX IPO ledger using PostgreSQL pool")
+     return p
+ 
+ 
+@@ -117,13 +121,12 @@ class AcexIpoLedger:
+ 
+     def __init__(self, db_path: str = "") -> None:
+         self._path = _resolve_db_path(db_path)
++        self._backend = service_backend(self._path, "AIMARKET_ACEX_IPO_DATABASE_URL")
+         self._lock = threading.RLock()
+         self._init_db()
+ 
+-    def _connect(self) -> sqlite3.Connection:
+-        conn = sqlite3.connect(self._path)
+-        conn.row_factory = sqlite3.Row
+-        return conn
++    def _connect(self):
++        return self._backend.get_connection()
+ 
+     def _init_db(self) -> None:
+         with self._lock, self._connect() as conn:
+diff --git a/aimarket_hub/api.py b/aimarket_hub/api.py
+index 0eabb86..4fe7edb 100644
+--- a/aimarket_hub/api.py
++++ b/aimarket_hub/api.py
+@@ -2825,6 +2825,18 @@ def create_app(
+                     try:
+                         from aimarket_hub.outbound_http import safe_post
+ 
++                        provider_headers = {
++                            "X-Payment-Channel": x_payment_channel or "",
++                            "X-AIMarket-Sandbox": "1" if sandbox_mode else "",
++                        }
++                        # Internal provider containers expose their capability gateway only
++                        # on the operator-named network. Never forward this secret to an
++                        # arbitrary federated URL.
++                        capability_token = os.environ.get("AIMARKET_CAPABILITY_TOKEN", "").strip()
++                        gateway_hosts = set(os.environ.get("AIMARKET_INVOKE_HOST_GATEWAY", "").lower().split(","))
++                        if capability_token and (urlparse(invoke_url).hostname or "").lower() in gateway_hosts:
++                            provider_headers["X-AIMarket-Internal-Token"] = capability_token
++
+                         ir = await safe_post(
+                             invoke_url,
+                             json={
+@@ -2832,10 +2844,7 @@ def create_app(
+                                 "product_id": body.product_id,
+                                 "capability_id": body.capability_id,
+                             },
+-                            headers={
+-                                "X-Payment-Channel": x_payment_channel or "",
+-                                "X-AIMarket-Sandbox": "1" if sandbox_mode else "",
+-                            },
++                            headers=provider_headers,
+                             invoke=True,
+                         )
+                         if ir.status_code == 200:
+@@ -4479,7 +4488,15 @@ def create_app(
+                     "categories": p.categories,
+                     "trusted": False,
+                     "status": "pending",
++                    # TWO counts, because they are two different things and a UI that
++                    # shows one of them silently shows the wrong one. `preview_` is what
++                    # this hub actually read and signature-checked from the peer's
++                    # manifest (capped by AIMARKET_FEDERATION_PREVIEW_MAX_CAPS, so it can
++                    # be lower than the truth); `declared_` is the peer's own number out
++                    # of its well-known — a claim, never a fact we established. Nothing
++                    # is indexed either way.
+                     "preview_capabilities": db.count_preview_capabilities(p.url),
++                    "declared_capabilities": p.capabilities_count,
+                     "assay_verdict": (db.get_peer_assay(p.url) or {}).get("verdict"),
+                     **identity_for(p, config),
+                     "declared": _peer_declared(p),
+@@ -4960,12 +4977,20 @@ def create_app(
+         }
+ 
+     @router.get("/health")
+-    async def hub_health():
++    async def hub_health(response: Response):
++        backend = getattr(db._conn, "backend_type", "unknown")
++        database_ok = True
++        try:
++            db._conn.execute("SELECT 1")
++        except Exception:
++            database_ok = False
++            response.status_code = 503
+         return {
+-            "status": "ok",
++            "status": "ok" if database_ok else "degraded",
+             "service": "aimarket-hub",
+             "version": config.hub_version,
+             "uptime_seconds": int(time.time() - _HUB_STARTED_AT),
++            "database": {"backend": backend, "healthy": database_ok},
+         }
+ 
+     def _public_consumer_label(raw: str) -> str:
+diff --git a/aimarket_hub/channels.py b/aimarket_hub/channels.py
+index 0f896a3..fc378df 100644
+--- a/aimarket_hub/channels.py
++++ b/aimarket_hub/channels.py
+@@ -656,6 +656,7 @@ class ChannelLedger:
+         from aimarket_hub.migrations import Migrations
+ 
+         self._db_path = db_path or _DB_PATH
++        database_url = database_url or os.getenv("AIMARKET_CHANNELS_DATABASE_URL", "")
+         self._backend = create_backend(
+             database_url=database_url,
+             db_path=self._db_path,
+diff --git a/aimarket_hub/cli.py b/aimarket_hub/cli.py
+index d242cf4..b3d3ea7 100644
+--- a/aimarket_hub/cli.py
++++ b/aimarket_hub/cli.py
+@@ -168,6 +168,12 @@ def _cmd_serve() -> int:
+ 
+     import uvicorn
+ 
++    prod = os.environ.get("AIFACTORY_PROD", "").strip() == "1"
++    if prod:
++        from aimarket_hub.storage import assert_production_postgres
++
++        assert_production_postgres()
++
+     config = HubConfig()
+     db = HubDatabase(config.db_path)
+     app = create_app(config=config, db=db)
+@@ -182,7 +188,6 @@ def _cmd_serve() -> int:
+         stub_flags.append("AIFACTORY_PAYMENT_TESTNET=1 (testnet mode — demo tx hashes accepted)")
+     if os.environ.get("AIMARKET_TEE_SOFTWARE_OK", "").strip() == "1":
+         stub_flags.append("AIMARKET_TEE_SOFTWARE_OK=1 (software TEE attestation — no hardware guarantee)")
+-    prod = os.environ.get("AIFACTORY_PROD", "").strip() == "1"
+     if prod:
+         stub_flags.append("AIFACTORY_PROD=1 (production mode — stub flags will HARD-BLOCK startup)")
+     for flag in stub_flags:
+diff --git a/aimarket_hub/crawler.py b/aimarket_hub/crawler.py
+index fbb98fd..d357dc0 100644
+--- a/aimarket_hub/crawler.py
++++ b/aimarket_hub/crawler.py
+@@ -933,7 +933,18 @@ class Crawler:
+         or manifest query reads. Returns how many were previewed (0 on any failure;
+         a preview is a convenience and must never break a crawl).
+         """
+-        if not (self.config.federation_open and self.config.federation_preview_capabilities):
++        # Its OWN switch decides this, not the open door. A closed-door hub still has
++        # pending peers — an inbound crawler is quarantined as pending in default mode,
++        # and a seed the operator never approved is pending too — and the landing page
++        # renders "capabilities: N" and a "Show what it offers" button for every one of
++        # them. Tied to `federation_open`, those read 0 and empty on every closed-door
++        # hub in the fleet: a promise the page could not keep (hub.attestedmemory.net,
++        # 4 knocking peers, 0 previewed, 2026-09-08). The defences that make a preview
++        # safe are in this function, not in the door: SSRF-checked URL, size-capped
++        # body, schema validation, a signature that must verify against the key we
++        # pinned, a freshness bound, and rows that land in a table no search, routing,
++        # invoke or manifest query reads.
++        if not self.config.federation_preview_capabilities:
+             return 0
+         if not pinned_key:
+             return 0  # nothing to verify against — refuse rather than show unsigned claims
+@@ -959,7 +970,12 @@ class Crawler:
+             rows = [c for c in caps[:limit] if isinstance(c, dict)]
+             return self.db.replace_preview_capabilities(base_url, rows)
+         except Exception as exc:  # pragma: no cover - defensive
+-            logger.info("Preview of %s failed: %s", base_url, exc)
++            # WARNING, not INFO. This branch is how a preview turns into a permanent zero
++            # on the operator's screen, and at INFO the container swallowed it: the
++            # Postgres upsert had been failing on every crawl for as long as the feature
++            # existed, and the page just said 0. A number that cannot be produced has to
++            # say so somewhere the operator will actually see it.
++            logger.warning("Preview of %s failed: %s", base_url, exc)
+             return 0
+ 
+     def _warn_on_index_shortfall(
+diff --git a/aimarket_hub/db_backend.py b/aimarket_hub/db_backend.py
+index 647b293..cfbc98b 100644
+--- a/aimarket_hub/db_backend.py
++++ b/aimarket_hub/db_backend.py
+@@ -145,6 +145,14 @@ def sqlite_to_pg(sql: str, table_name_for_upsert: str = "", unique_cols: list[st
+         "capabilities": ["capability_id", "product_id", "source_hub"],
+         "peers": ["url"],
+         "peer_assays": ["peer_url"],
++        # Its PRIMARY KEY, from migration 023. Missing here, the fallback below emitted
++        # `ON CONFLICT (id)` for a table that has no `id`, so every preview write raised
++        # on Postgres — and `_preview_pending_manifest` swallows exceptions and returns 0.
++        # Result: "capabilities: 0" for every knocking hub on every Postgres deployment,
++        # with the reason only in a suppressed INFO line (hub.attestedmemory.net,
++        # 2026-09-08). The fallback is the trap: it produces valid-looking SQL for a key
++        # that may not exist, so a table added without an entry here fails at runtime.
++        "peer_preview_capabilities": ["peer_url", "capability_id", "product_id"],
+     }
+ 
+     def _translate_upsert(m: re.Match) -> str:
+@@ -423,7 +431,12 @@ class _TranslatingConnection:
+         return self._raw.cursor().executemany(sqlite_to_pg(sql), seq)
+ 
+     def executescript(self, sql: str) -> Any:
+-        return self._raw.execute(sqlite_to_pg(sql))
++        result = None
++        translated = _strip_sql_comments(sqlite_to_pg(sql))
++        for statement in translated.split(";"):
++            if statement.strip():
++                result = self._raw.execute(statement)
++        return result
+ 
+     def cursor(self, *a: Any, **kw: Any) -> Any:
+         return self._raw.cursor(*a, **kw)
+diff --git a/aimarket_hub/escrow_bridge/store.py b/aimarket_hub/escrow_bridge/store.py
+index a0204db..8abb70b 100644
+--- a/aimarket_hub/escrow_bridge/store.py
++++ b/aimarket_hub/escrow_bridge/store.py
+@@ -36,6 +36,7 @@ from pathlib import Path
+ from typing import Any
+ 
+ from aimarket_hub.escrow_bridge import config
++from aimarket_hub.storage import service_backend, service_database_url
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -188,34 +189,48 @@ class AuthorizationStore:
+         """
+         self.db_path = db_path or default_db_path()
+         self._lock = threading.Lock()
+-        if not create and self.db_path != ":memory:" and not Path(self.db_path).exists():
++        is_pg = bool(service_database_url("AIMARKET_ESCROW_DATABASE_URL"))
++        if not create and not is_pg and self.db_path != ":memory:" and not Path(self.db_path).exists():
+             raise StoreError(f"no authorization store at {self.db_path}")
+-        if self.db_path != ":memory:":
++        if not is_pg and self.db_path != ":memory:":
+             Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+-        # check_same_thread=False + an explicit lock: the mirror runs off the request
+-        # thread, and serialising every write is cheap at this volume.
+-        self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
+-        self._conn.row_factory = sqlite3.Row
++        self._backend = service_backend(self.db_path, "AIMARKET_ESCROW_DATABASE_URL")
++        self._connection_context = self._backend.get_connection()
++        self._conn = self._connection_context.__enter__()
+         with self._lock:
+             self._conn.executescript(_SCHEMA)
+             # Additive migration: `submitted_at` postdates the first stores, and the
+             # rolling spend cap reads it. CREATE TABLE IF NOT EXISTS cannot add a column
+             # to a database that already exists — production had one with three rows in it.
+-            have = {r["name"] for r in self._conn.execute(
+-                "PRAGMA table_info(debit_authorizations)")}
++            if self._backend.backend_type == "postgresql":
++                have = {r["column_name"] for r in self._conn.execute(
++                    "SELECT column_name FROM information_schema.columns "
++                    "WHERE table_name = 'debit_authorizations'")}
++            else:
++                have = {r["name"] for r in self._conn.execute(
++                    "PRAGMA table_info(debit_authorizations)")}
+             if "submitted_at" not in have:
+                 self._conn.execute(
+                     "ALTER TABLE debit_authorizations "
+                     "ADD COLUMN submitted_at TEXT NOT NULL DEFAULT ''"
+                 )
+             # Migrate legacy unique(channel, nonce) → partial unique on active rows only.
+-            idx = {
+-                r["name"]: (r["sql"] or "")
+-                for r in self._conn.execute(
+-                    "SELECT name, sql FROM sqlite_master WHERE type='index' "
+-                    "AND tbl_name='debit_authorizations'"
+-                )
+-            }
++            if self._backend.backend_type == "postgresql":
++                idx = {
++                    r["indexname"]: (r["indexdef"] or "")
++                    for r in self._conn.execute(
++                        "SELECT indexname, indexdef FROM pg_indexes "
++                        "WHERE tablename='debit_authorizations'"
++                    )
++                }
++            else:
++                idx = {
++                    r["name"]: (r["sql"] or "")
++                    for r in self._conn.execute(
++                        "SELECT name, sql FROM sqlite_master WHERE type='index' "
++                        "AND tbl_name='debit_authorizations'"
++                    )
++                }
+             if "idx_auth_channel_nonce" in idx:
+                 self._conn.execute("DROP INDEX IF EXISTS idx_auth_channel_nonce")
+             if "idx_auth_channel_nonce_active" not in idx:
+@@ -228,7 +243,7 @@ class AuthorizationStore:
+ 
+     def close(self) -> None:
+         with self._lock:
+-            self._conn.close()
++            self._connection_context.__exit__(None, None, None)
+ 
+     # ── writes ───────────────────────────────────────────────────────────────
+ 
+@@ -278,6 +293,13 @@ class AuthorizationStore:
+                     f"an authorization for escrow channel {escrow_channel[:14]}… at nonce "
+                     f"{nonce} is already stored"
+                 ) from exc
++            except Exception as exc:
++                if getattr(exc, "sqlstate", "") == "23505":
++                    self._conn.rollback()
++                    raise StoreError(
++                        f"an authorization for receipt {receipt_id} or nonce {nonce} is already stored"
++                    ) from exc
++                raise
+         row = self.get(receipt_id)
+         assert row is not None
+         return row
+diff --git a/aimarket_hub/factory_products_loader.py b/aimarket_hub/factory_products_loader.py
+index 10bc6b8..d0c6dff 100644
+--- a/aimarket_hub/factory_products_loader.py
++++ b/aimarket_hub/factory_products_loader.py
+@@ -8,6 +8,7 @@ import os
+ import sqlite3
+ from pathlib import Path
+ from typing import Any
++from aimarket_hub.storage import service_backend, service_database_url
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -70,13 +71,13 @@ def _enrich_product(pid: str, row: dict[str, Any]) -> dict[str, Any]:
+ 
+ def _read_products_from_sqlite() -> dict[str, dict[str, Any]]:
+     db = _pipeline_db_path()
+-    if not db.is_file():
++    dsn = service_database_url("AIFACTORY_DATABASE_URL")
++    if not dsn and not db.is_file():
+         return {}
+     out: dict[str, dict[str, Any]] = {}
+     try:
+-        con = sqlite3.connect(db)
+-        con.row_factory = sqlite3.Row
+-        try:
++        backend = service_backend(db, "AIFACTORY_DATABASE_URL")
++        with backend.get_connection() as con:
+             rows = con.execute(
+                 "SELECT id, idea, state, category, spec, tags, error, created_at, updated_at "
+                 "FROM products"
+@@ -105,10 +106,8 @@ def _read_products_from_sqlite() -> dict[str, dict[str, Any]]:
+                     except json.JSONDecodeError:
+                         base["tags"] = row["tags"]
+                 out[pid] = _enrich_product(pid, base)
+-        finally:
+-            con.close()
+-    except sqlite3.Error as exc:
+-        logger.debug("SQLite products read failed: %s", exc)
++    except Exception as exc:
++        logger.debug("factory products read failed: %s", exc)
+     return out
+ 
+ 
+diff --git a/aimarket_hub/federation_assay.py b/aimarket_hub/federation_assay.py
+index 1d58959..c6dd517 100644
+--- a/aimarket_hub/federation_assay.py
++++ b/aimarket_hub/federation_assay.py
+@@ -1124,14 +1124,6 @@ async def _probe_sandbox(
+             return None
+         sig = receipt.get("signature") if isinstance(receipt.get("signature"), dict) else {}
+         sig_key = str(sig.get("public_key") or "").strip()
+-        if sig_key and advertised_key and not same_key(sig_key, advertised_key):
+-            if signer.verify_receipt_signature(receipt, sig_key):
+-                _add(
+-                    checks, "sandbox_key_mismatch", False,
+-                    "receipt is signed by a different key than well-known advertised",
+-                )
+-                _add(checks, "sandbox_receipt_signed", False, "foreign signer")
+-                return None
+         signed = bool(
+             advertised_key and signer.verify_receipt_signature(receipt, advertised_key)
+         )
+@@ -1155,12 +1147,38 @@ async def _probe_sandbox(
+                     and signer.verify_receipt_signature(receipt, origin_key)):
+                 signed, signed_by = True, "source_hub"
+                 sandbox["receipt_source_hub"] = source_hub
++        # A signature by a key that is neither the peer's own nor the declared source
++        # hub's is the peer signing work with somebody else's key. That is the check.
++        #
++        # The ORDER above it is the check too, and it used to be wrong: this block sat
++        # ten lines EARLIER and returned `fail` the moment a foreign key verified, so
++        # the re-export reconciliation that would have accepted the receipt was
++        # unreachable for exactly the peers it was written for. Measured on
++        # hub.attestedmemory.net 2026-09-08: hub.modelmarket.dev, modelmarket.dev and
++        # independentai.network/hub were all painted ASSAY FAIL on the public landing
++        # page, all three probed on a MOMUS capability they re-export, all three signed
++        # by the MOMUS key this hub itself holds as an active peer. An exemption has to
++        # be tried before the verdict that forecloses it.
++        if not signed and sig_key and advertised_key and not same_key(sig_key, advertised_key):
++            if signer.verify_receipt_signature(receipt, sig_key):
++                _add(
++                    checks, "sandbox_key_mismatch", False,
++                    "receipt is signed by a different key than well-known advertised",
++                )
++                _add(checks, "sandbox_receipt_signed", False, "foreign signer")
++                return None
+         sandbox["receipt_signed"] = signed
+         sandbox["receipt_signed_by"] = signed_by
+-        _add(
+-            checks, "sandbox_receipt_signed", signed,
+-            "" if signed else "receipt missing or not signed by advertised key",
+-        )
++        if signed and signed_by == "source_hub":
++            detail = (
++                f"signed by the declared source hub {source_hub} — verified against the "
++                "key this hub holds for it, not one the peer supplied"
++            )
++        elif signed:
++            detail = ""
++        else:
++            detail = "receipt missing or not signed by advertised key"
++        _add(checks, "sandbox_receipt_signed", signed, detail)
+         return payload if signed else None
+     except Exception as exc:
+         sandbox["error"] = str(exc)[:200]
+diff --git a/aimarket_hub/sandbox_trials.py b/aimarket_hub/sandbox_trials.py
+index 74d4858..ad7bbee 100644
+--- a/aimarket_hub/sandbox_trials.py
++++ b/aimarket_hub/sandbox_trials.py
+@@ -32,6 +32,7 @@ import time
+ import uuid
+ from pathlib import Path
+ from typing import Any
++from aimarket_hub.storage import service_backend, service_database_url
+ 
+ _ENABLED = os.getenv("AIMARKET_SANDBOX_ENABLED", "1").strip().lower() not in ("0", "false", "no")
+ _MAX_PER_VISITOR = int(os.getenv("AIMARKET_SANDBOX_MAX_PER_VISITOR", "3"))
+@@ -251,12 +252,14 @@ class SandboxTrialLedger:
+ 
+     def __init__(self, db_path: str = "") -> None:
+         self._path = Path(db_path or _DB_PATH)
+-        self._path.parent.mkdir(parents=True, exist_ok=True)
++        if not service_database_url("AIMARKET_SANDBOX_DATABASE_URL"):
++            self._path.parent.mkdir(parents=True, exist_ok=True)
++        self._backend = service_backend(self._path, "AIMARKET_SANDBOX_DATABASE_URL")
+         self._lock = threading.Lock()
+         self._init_db()
+ 
+     def _init_db(self) -> None:
+-        with sqlite3.connect(self._path) as conn:
++        with self._get_conn() as conn:
+             conn.execute("""
+                 CREATE TABLE IF NOT EXISTS visitor_trials (
+                     visitor_id TEXT PRIMARY KEY,
+@@ -285,6 +288,9 @@ class SandboxTrialLedger:
+             """)
+             conn.commit()
+ 
++    def _get_conn(self):
++        return self._backend.get_connection()
++
+     def quota(self, visitor_id: str) -> dict[str, Any]:
+         if not _ENABLED:
+             return {"enabled": False, "max_trials": 0, "used": 0, "remaining": 0}
+@@ -324,7 +330,7 @@ class SandboxTrialLedger:
+             return {"error": "rate_limit_exceeded", "detail": "too many sandbox tries from this network"}
+ 
+         window = current_window_key()
+-        with self._lock, sqlite3.connect(self._path) as conn:
++        with self._lock, self._get_conn() as conn:
+             if window:
+                 row = conn.execute(
+                     "SELECT used FROM visitor_trials_windowed WHERE visitor_id = ? AND window_key = ?",
+@@ -400,7 +406,7 @@ class SandboxTrialLedger:
+             return {"error": "invalid_visitor_id"}
+ 
+         window = current_window_key()
+-        with self._lock, sqlite3.connect(self._path) as conn:
++        with self._lock, self._get_conn() as conn:
+             if window:
+                 row = conn.execute(
+                     "SELECT used FROM visitor_trials_windowed WHERE visitor_id = ? AND window_key = ?",
+@@ -442,7 +448,7 @@ class SandboxTrialLedger:
+ 
+     def _get_used(self, visitor_id: str) -> int:
+         window = current_window_key()
+-        with sqlite3.connect(self._path) as conn:
++        with self._get_conn() as conn:
+             if window:
+                 row = conn.execute(
+                     "SELECT used FROM visitor_trials_windowed WHERE visitor_id = ? AND window_key = ?",
+@@ -456,7 +462,7 @@ class SandboxTrialLedger:
+ 
+     def _ip_within_limit(self, ip: str) -> bool:
+         cutoff = time.time() - 3600
+-        with self._lock, sqlite3.connect(self._path) as conn:
++        with self._lock, self._get_conn() as conn:
+             count = conn.execute(
+                 "SELECT COUNT(*) FROM ip_hits WHERE ip = ? AND ts > ?", (ip, cutoff)
+             ).fetchone()[0]
+@@ -464,7 +470,7 @@ class SandboxTrialLedger:
+ 
+     def _record_ip(self, ip: str) -> None:
+         now = time.time()
+-        with self._lock, sqlite3.connect(self._path) as conn:
++        with self._lock, self._get_conn() as conn:
+             conn.execute("INSERT INTO ip_hits (ip, ts) VALUES (?, ?)", (ip, now))
+             conn.execute("DELETE FROM ip_hits WHERE ts < ?", (now - 7200,))
+             conn.commit()
+diff --git a/aimarket_hub/storage.py b/aimarket_hub/storage.py
+new file mode 100644
+index 0000000..fea8164
+--- /dev/null
++++ b/aimarket_hub/storage.py
+@@ -0,0 +1,80 @@
++"""Shared storage policy for bundled Hub subsystems."""
++
++from __future__ import annotations
++
++import os
++import re
++from pathlib import Path
++
++from aimarket_hub.db_backend import DBBackend, create_backend
++
++
++def service_database_url(env_name: str) -> str:
++    """Resolve a subsystem DSN, falling back to the hub DSN for local installs."""
++    return (os.getenv(env_name) or os.getenv("DATABASE_URL") or "").strip()
++
++
++def service_backend(db_path: str | Path, env_name: str) -> DBBackend:
++    return create_backend(database_url=service_database_url(env_name), db_path=db_path)
++
++
++def _truthy(name: str, default: str = "") -> bool:
++    return os.getenv(name, default).strip().lower() in {"1", "true", "yes"}
++
++
++def _require_secret(name: str) -> None:
++    if len(os.getenv(name, "").strip()) < 32:
++        raise RuntimeError(f"{name} must be a random 32+ character secret")
++
++
++def assert_production_postgres() -> None:
++    if _truthy("AIFACTORY_PROD"):
++        names = (
++            "DATABASE_URL", "AIMARKET_CHANNELS_DATABASE_URL", "AIMARKET_SANDBOX_DATABASE_URL",
++            "AIMARKET_ACEX_IPO_DATABASE_URL", "AIMARKET_ACEX_AUDIT_DATABASE_URL",
++            "AIMARKET_ZK_DATABASE_URL", "AIMARKET_ESCROW_DATABASE_URL",
++            "AIFACTORY_DATABASE_URL",
++        )
++        missing = [name for name in names if not os.getenv(name, "").strip()]
++        non_pg = [name for name in names if os.getenv(name, "").strip()
++                  and not os.getenv(name, "").strip().startswith(("postgresql://", "postgres://"))]
++        if missing or non_pg:
++            detail = ", ".join(missing + non_pg)
++            raise RuntimeError(f"production requires PostgreSQL DSNs for every Hub store: {detail}")
++        for name in ("AIMARKET_CAPABILITY_TOKEN", "AIMARKET_ADMIN_TOKEN", "AIMARKET_TEAM_AUTH_SECRET"):
++            _require_secret(name)
++        publisher_tokens = os.getenv("AIMARKET_PUBLISHER_TOKENS", "").split(",")
++        if not publisher_tokens or any(
++            ":" not in item or len(item.split(":", 1)[1].strip()) < 32
++            for item in publisher_tokens
++        ):
++            raise RuntimeError("every AIMARKET_PUBLISHER_TOKENS entry must contain a 32+ character secret")
++        publisher_ids = {item.split(":", 1)[0].strip() for item in publisher_tokens}
++        operator_publishers = {
++            item.strip() for item in os.getenv("AIMARKET_SUPPLY_OPERATOR_PUBLISHERS", "").split(",")
++            if item.strip()
++        }
++        unknown_operator_publishers = operator_publishers - publisher_ids
++        if unknown_operator_publishers:
++            raise RuntimeError(
++                "operator publishers require their own AIMARKET_PUBLISHER_TOKENS entry: "
++                + ", ".join(sorted(unknown_operator_publishers))
++            )
++        if not _truthy("AIMARKET_PQC_REQUIRE", "1"):
++            raise RuntimeError("AIMARKET_PQC_REQUIRE cannot be disabled in production")
++        if not _truthy("AIMARKET_SUPPLY_REQUIRE_RESPONSE_SIG", "1"):
++            raise RuntimeError("provider response signatures cannot be disabled in production")
++        unsafe_flags = (
++            "AIMARKET_SUPPLY_SECURITY_RELAXED", "AIMARKET_SANDBOX_STUB_INVOKE",
++            "AIMARKET_ZK_SIMULATED", "AIMARKET_TEE_SOFTWARE_OK",
++            "AIFACTORY_PAYMENT_VERIFY_STUB",
++        )
++        enabled = [name for name in unsafe_flags if _truthy(name)]
++        if enabled:
++            raise RuntimeError("unsafe development flags are forbidden in production: " + ", ".join(enabled))
++        if _truthy("AIFACTORY_PAYMENT_TESTNET", "1"):
++            raise RuntimeError("AIFACTORY_PAYMENT_TESTNET must be explicitly disabled in production")
++        if _truthy("AIMARKET_ALLOW_LOCAL_PUBLISH"):
++            gateways = [value.strip() for value in os.getenv("AIMARKET_INVOKE_HOST_GATEWAY", "").split(",") if value.strip()]
++            if not gateways or any(not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?", value) for value in gateways):
++                raise RuntimeError("local provider publishing requires an explicit safe AIMARKET_INVOKE_HOST_GATEWAY allowlist")
+diff --git a/aimarket_hub/supply_security.py b/aimarket_hub/supply_security.py
+index 6f4611d..e6bdc6c 100644
+--- a/aimarket_hub/supply_security.py
++++ b/aimarket_hub/supply_security.py
+@@ -158,6 +158,9 @@ class SupplySecurityPolicy:
+     max_input_keys: int = 32
+     max_input_json_bytes: int = 32_768
+     product_allowlist: tuple[str, ...] = ()
++    # Explicit first-party services controlled by this Hub operator. They authenticate
++    # with their per-publisher credential but do not pretend to post external collateral.
++    operator_publishers: tuple[str, ...] = ()
+     relaxed: bool = False
+     # Griefing-resistant provider slashing: only slash after this many genuine
+     # failures within the window, not on every single failure.
+@@ -239,6 +242,8 @@ class SupplySecurityPolicy:
+         relaxed = os.environ.get("AIMARKET_SUPPLY_SECURITY_RELAXED", "").strip() == "1"
+         allow_raw = os.environ.get("AIMARKET_SUPPLY_PRODUCT_ALLOWLIST", "").strip()
+         allowlist = tuple(x.strip() for x in allow_raw.split(",") if x.strip())
++        operator_raw = os.environ.get("AIMARKET_SUPPLY_OPERATOR_PUBLISHERS", "").strip()
++        operator_publishers = tuple(x.strip() for x in operator_raw.split(",") if x.strip())
+         prod = _is_production_mode()
+         default_stake = 25.0 if prod and not relaxed else 10.0
+         min_stake = cls._finite_float("AIMARKET_SUPPLY_MIN_STAKE_USD", default_stake)
+@@ -260,6 +265,7 @@ class SupplySecurityPolicy:
+             max_input_keys=int(os.environ.get("AIMARKET_SUPPLY_MAX_INPUT_KEYS", "32")),
+             max_input_json_bytes=int(os.environ.get("AIMARKET_SUPPLY_MAX_INPUT_JSON_BYTES", "32768")),
+             product_allowlist=allowlist,
++            operator_publishers=operator_publishers,
+             relaxed=relaxed,
+             slash_failure_threshold=int(os.environ.get("AIMARKET_SUPPLY_SLASH_FAILURE_THRESHOLD", "3")),
+             slash_failure_window_s=cls._positive_window("AIMARKET_SUPPLY_SLASH_FAILURE_WINDOW_S", 600),
+@@ -390,7 +396,7 @@ class SupplySecurity:
+             recent = self.db.supply_publish_count_recent(publisher_id, hours=1)
+             if recent >= self.policy.publish_per_hour:
+                 raise ValueError(f"publish rate limit exceeded ({self.policy.publish_per_hour}/hour)")
+-        if self.policy.min_stake_usd > 0:
++        if self.policy.min_stake_usd > 0 and publisher_id not in self.policy.operator_publishers:
+             stake = self.db.supply_stake_get(publisher_id)
+             if stake < self.policy.min_stake_usd:
+                 raise ValueError(
+diff --git a/aimarket_hub/zk_groth16.py b/aimarket_hub/zk_groth16.py
+index 6518778..85f36a6 100644
+--- a/aimarket_hub/zk_groth16.py
++++ b/aimarket_hub/zk_groth16.py
+@@ -52,6 +52,7 @@ from pathlib import Path
+ from typing import Any
+ 
+ from aimarket_hub.signing import Signer
++from aimarket_hub.storage import service_backend, service_database_url
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -119,7 +120,9 @@ class _NullifierStore:
+     def __init__(self, db_path: Path):
+         self._path = db_path
+         self._lock = threading.Lock()
+-        db_path.parent.mkdir(parents=True, exist_ok=True)
++        if not service_database_url("AIMARKET_ZK_DATABASE_URL"):
++            db_path.parent.mkdir(parents=True, exist_ok=True)
++        self._backend = service_backend(db_path, "AIMARKET_ZK_DATABASE_URL")
+         with self._conn() as cx:
+             cx.execute(
+                 "CREATE TABLE IF NOT EXISTS used_nullifiers ("
+@@ -130,12 +133,8 @@ class _NullifierStore:
+ 
+     @contextmanager
+     def _conn(self):
+-        cx = sqlite3.connect(str(self._path), timeout=10, isolation_level=None)
+-        try:
+-            cx.execute("PRAGMA journal_mode=WAL")
++        with self._backend.get_connection() as cx:
+             yield cx
+-        finally:
+-            cx.close()
+ 
+     def contains(self, nullifier: str) -> bool:
+         with self._lock, self._conn() as cx:
+@@ -153,9 +152,14 @@ class _NullifierStore:
+                     "INSERT INTO used_nullifiers (nullifier, used_at) VALUES (?, ?)",
+                     (nullifier, int(time.time())),
+                 )
++                cx.commit()
+                 return True
+             except sqlite3.IntegrityError:
+                 return False
++            except Exception as error:
++                if getattr(error, "sqlstate", "") == "23505":
++                    return False
++                raise
+ 
+     def count(self) -> int:
+         with self._conn() as cx:
+diff --git a/hub-ui-i18n.json b/hub-ui-i18n.json
+index bfcd945..f99a86c 100644
+--- a/hub-ui-i18n.json
++++ b/hub-ui-i18n.json
+@@ -182,6 +182,7 @@
+       "pending_via": "via",
+       "pending_preview_empty": "Nothing previewed yet",
+       "pending_caps": "claimed",
++      "pending_caps_read": "read",
+       "knock_empty": "Nobody is knocking. New hubs appear here after they announce.",
+       "knock_operator": "Operator desk",
+       "assay_pass": "assay pass",
+@@ -364,6 +365,7 @@
+       "pending_via": "через",
+       "pending_preview_empty": "Пока ничего не считано",
+       "pending_caps": "заявлено",
++      "pending_caps_read": "считано",
+       "knock_empty": "Никто не стучится. Новые хабы появятся здесь после announce.",
+       "knock_operator": "Стол оператора",
+       "assay_pass": "проба пройдена",
+@@ -546,6 +548,7 @@
+       "pending_via": "vía",
+       "pending_preview_empty": "Aún no hay vista previa",
+       "pending_caps": "declaradas",
++      "pending_caps_read": "leídas",
+       "knock_empty": "Nadie está llamando. Los hubs nuevos aparecen aquí tras anunciarse.",
+       "knock_operator": "Mesa del operador",
+       "assay_pass": "ensayo ok",
+@@ -728,6 +731,7 @@
+       "pending_via": "via",
+       "pending_preview_empty": "Aucun aperçu pour l’instant",
+       "pending_caps": "déclarées",
++      "pending_caps_read": "lues",
+       "knock_empty": "Personne à la porte. Les nouveaux hubs apparaissent ici après l’annonce.",
+       "knock_operator": "Bureau opérateur",
+       "assay_pass": "essai ok",
+@@ -910,6 +914,7 @@
+       "pending_via": "来自",
+       "pending_preview_empty": "尚无预览内容",
+       "pending_caps": "声称",
++      "pending_caps_read": "已读取",
+       "knock_empty": "暂无叩门。新枢纽在 announce 之后会出现在这里。",
+       "knock_operator": "运营台",
+       "assay_pass": "检测通过",
+diff --git a/operator.html b/operator.html
+index 177cb57..c79248f 100644
+--- a/operator.html
++++ b/operator.html
+@@ -200,14 +200,20 @@
+ 
+   function peerCard(p, pending) {
+     var url = p.url || "";
+-    var claimed = Number(p.preview_capabilities) || Number(p.capabilities_count) || 0;
++    // Three different numbers used to share one variable through `a || b || 0`, so a
++    // pending hub that had previewed nothing silently reported its self-declared count
++    // as though this hub had read it — and on a closed-door deployment both were 0.
++    var previewed = Number(p.preview_capabilities) || 0;   // read + signature-checked here
++    var declared = Number(p.declared_capabilities) || 0;   // the peer's own claim
++    var indexed = Number(p.capabilities_count) || 0;       // in the catalogue (trusted only)
+     var verdict = p.assay_verdict || "";
+     var chip = verdict
+       ? '<span class="chip ' + esc(verdict) + '">assay ' + esc(verdict) + "</span>"
+       : '<span class="chip">not assayed</span>';
+     var extra = pending
+-      ? "<span>first seen " + esc(p.first_seen || "—") + "</span><span>via " + esc(p.discoverer || "—") + "</span><span>" + claimed + " claimed</span><span>" + chip + "</span>"
+-      : "<span>" + claimed + " indexed</span><span>trust " + esc(p.trust_score) + "</span><span>" + esc(p.status || "active") + "</span>";
++      ? "<span>first seen " + esc(p.first_seen || "—") + "</span><span>via " + esc(p.discoverer || "—") + "</span><span>" + declared + " claimed</span>" +
++        (previewed ? "<span>" + previewed + " read</span>" : "") + "<span>" + chip + "</span>"
++      : "<span>" + indexed + " indexed</span><span>trust " + esc(p.trust_score) + "</span><span>" + esc(p.status || "active") + "</span>";
+     var actions = pending
+       ? '<div class="btn-row">' +
+         '<button type="button" class="btn btn-ghost" data-preview="' + esc(url) + '">Preview claims</button>' +
+diff --git a/terminal-home.html b/terminal-home.html
+index 3546410..58b1a8f 100644
+--- a/terminal-home.html
++++ b/terminal-home.html
+@@ -2180,7 +2180,13 @@
+   function knockItem(p) {
+     const url = String(p.url || '');
+     const seen = p.first_seen ? esc(String(p.first_seen).replace('T', ' ').replace(/Z$/, ' UTC')) : '—';
+-    const claimed = Number(p.preview_capabilities) || 0;
++    // TWO numbers, and neither may stand in for the other. `claimed` is the peer's own
++    // count from its well-known; `read` is what this hub fetched and signature-checked
++    // into the quarantined preview — capped, so it can be the smaller of the two. This
++    // read `preview_capabilities || 0` alone, which is why every knocking hub on a
++    // closed-door deployment showed "claimed 0" while offering 28 capabilities.
++    const previewed = Number(p.preview_capabilities) || 0;
++    const declared = Number(p.declared_capabilities) || 0;
+     const verdict = String(p.assay_verdict || '');
+     const assayLabel = verdict === 'pass' ? t('assay_pass')
+       : verdict === 'review' ? t('assay_review')
+@@ -2192,7 +2198,8 @@
+       <div class="pending-meta">
+         <span><b>${esc(t('pending_first_seen'))}</b> ${seen}</span>
+         <span><b>${esc(t('pending_via'))}</b> ${esc(p.discoverer || '—')}</span>
+-        <span><b>${esc(t('pending_caps'))}</b> ${claimed}</span>
++        <span><b>${esc(t('pending_caps'))}</b> ${declared}</span>
++        ${previewed ? `<span><b>${esc(t('pending_caps_read'))}</b> ${previewed}</span>` : ''}
+         <span class="assay-chip ${esc(verdict)}">${esc(assayLabel)}</span>
+       </div>
+       <div class="pending-note">${esc(t('pending_note'))}</div>
+diff --git a/tests/test_crawler.py b/tests/test_crawler.py
+index 810aea5..f21a44a 100644
+--- a/tests/test_crawler.py
++++ b/tests/test_crawler.py
+@@ -241,7 +241,14 @@ class TestPeerTrustGate:
+         assert result == {"capabilities_count": 0, "new_peer_urls": []}   # not indexed
+         peer = db.get_peer("https://seed-hub.example.com")
+         assert peer is not None and peer.trusted is False                 # pending approval
+-        assert crawler._safe_get.await_count == 1                          # manifest never fetched
++        # TWO fetches now, not one: the well-known, then the manifest for the operator's
++        # preview (`_preview_pending_manifest`, no longer gated on the open door). The gate
++        # this class guards is the CATALOGUE, not the fetch — so it is asserted on the
++        # catalogue. The preview read cannot index either: it writes to its own quarantined
++        # table, and this body is a well-known, not a manifest, so it previews nothing.
++        assert crawler._safe_get.await_count == 2
++        assert db.count_capabilities() == 0
++        assert db.count_preview_capabilities("https://seed-hub.example.com") == 0
+ 
+     @pytest.mark.asyncio
+     async def test_key_change_persists_reject_reason_for_peers_list(self, db, signer, config):
+diff --git a/tests/test_db_backend.py b/tests/test_db_backend.py
+index cbde56b..c24b76b 100644
+--- a/tests/test_db_backend.py
++++ b/tests/test_db_backend.py
+@@ -481,6 +481,67 @@ class _FakePool:
+         self.closed = True
+ 
+ 
++class TestUpsertConflictKeys:
++    """`INSERT OR REPLACE` must translate to a conflict key the Postgres table HAS.
++
++    The translator falls back to `ON CONFLICT (id)` for any table it does not know, which
++    is valid SQL against a table with no `id` — so the failure is a runtime exception on
++    the Postgres deployments only, and any caller that swallows exceptions turns it into a
++    silent zero. `peer_preview_capabilities` did exactly that: every knocking hub on
++    hub.attestedmemory.net displayed "capabilities: 0" while the peers offered dozens.
++    """
++
++    def test_every_upsert_target_has_a_declared_conflict_key(self):
++        import re
++
++        pkg = Path(db_backend_mod.__file__).parent
++        targets: set[str] = set()
++        for path in pkg.rglob("*.py"):
++            for match in re.finditer(
++                r"INSERT\s+OR\s+REPLACE\s+INTO\s+([a-zA-Z_][a-zA-Z0-9_]*)",
++                path.read_text(encoding="utf-8"),
++                re.I,
++            ):
++                targets.add(match.group(1))
++        # The scan itself must not be what breaks: if the statement form ever changes,
++        # this asserts loudly instead of passing on an empty set.
++        assert targets, "no INSERT OR REPLACE found — re-anchor this guard"
++        declared = set(_upsert_default_conflict_keys())
++        missing = sorted(targets - declared)
++        assert not missing, (
++            "these tables upsert with no declared conflict key, so Postgres gets "
++            f"ON CONFLICT (id): {missing}"
++        )
++
++    def test_the_preview_table_conflicts_on_its_primary_key(self):
++        sql = db_backend_mod.sqlite_to_pg(
++            "INSERT OR REPLACE INTO peer_preview_capabilities "
++            "(peer_url, capability_id, product_id, name) VALUES (?, ?, ?, ?)"
++        )
++        assert "ON CONFLICT (peer_url, capability_id, product_id)" in sql
++        assert "ON CONFLICT (id)" not in sql
++        # And the migration's key is the one we claim it is.
++        from aimarket_hub import migrations
++
++        src = Path(migrations.__file__).read_text(encoding="utf-8")
++        table = src.split("CREATE TABLE IF NOT EXISTS peer_preview_capabilities", 1)[1]
++        assert "PRIMARY KEY (peer_url, capability_id, product_id)" in table.split(");", 1)[0]
++
++
++def _upsert_default_conflict_keys() -> list[str]:
++    """The tables `sqlite_to_pg` knows a conflict key for, read from its own source.
++
++    The map is a local inside the function, so it cannot be imported; scraping the one
++    literal is still better than duplicating the list in the test and letting the two
++    drift apart silently.
++    """
++    import re
++
++    src = Path(db_backend_mod.__file__).read_text(encoding="utf-8")
++    block = src.split("_DEFAULT_CONFLICT: dict[str, list[str]] = {", 1)[1].split("}", 1)[0]
++    return re.findall(r'^\s*"([a-zA-Z_][a-zA-Z0-9_]*)":', block, re.M)
++
++
+ def _pg_backend(max_size: int = 2):
+     """A PostgresBackend wired to a fake pool. `__init__` is bypassed because it imports
+     psycopg and dials a server; every method under test only touches the pool."""
+diff --git a/tests/test_federation_assay.py b/tests/test_federation_assay.py
+index b7c0335..e1faa71 100644
+--- a/tests/test_federation_assay.py
++++ b/tests/test_federation_assay.py
+@@ -1160,6 +1160,80 @@ def test_a_routed_receipt_is_accepted_when_signed_by_the_source_we_already_know(
+     assert dossier["verdict"] == "pass"
+ 
+ 
++def test_a_routed_receipt_that_names_its_signer_is_still_accepted(tmp_path, resolvable):
++    """The SAME routed reply, in the shape a real origin actually sends.
++
++    Every other routed test signs with `Signer.sign_receipt`, which emits
++    `{algorithm, value}` and no `public_key` — so the foreign-signer branch was never
++    entered and the whole ordering bug was invisible to this file. A real origin names
++    its key: MOMUS answers `signature.public_key = TmeHyNcvEC6/...`, and with that field
++    present the assay hard-failed on `sandbox_key_mismatch` ten lines before reaching
++    the re-export path that accepts the receipt. Three hubs of our own federation sat on
++    hub.attestedmemory.net's public landing page as ASSAY FAIL because of it.
++    """
++    root = tmp_path / "routed-named"
++    root.mkdir()
++    db = HubDatabase(root / "hub.db")
++    signer = Signer(root / "key")
++    peer = Signer(root / "peer-key")
++    upstream = Signer(root / "upstream-key")
++    origin = "https://origin.example"
++    db.upsert_peer(Peer(url=origin, name="Origin", public_key=upstream.public_key_b64,
++                        trusted=True), status="active")
++    wk, manifest = _reexport_docs(peer, origin)
++
++    async def post_json(url, body, headers):
++        out = await _signed_post(upstream, url, body, headers)
++        out["json"]["receipt"]["signature"]["public_key"] = upstream.public_key_b64
++        out["json"]["routed_via"] = STRANGER
++        return out
++
++    dossier = _run(db, signer, wk, manifest, post_json)
++    receipt = next(c for c in dossier["checks"] if c["id"] == "sandbox_receipt_signed")
++    assert receipt["ok"] is True, receipt["detail"]
++    assert origin in receipt["detail"]
++    assert dossier["sandbox"]["receipt_signed_by"] == "source_hub"
++    # The mismatch check must not merely be outvoted — it must not have fired.
++    assert not [c for c in dossier["checks"]
++                if c["id"] == "sandbox_key_mismatch" and c["ok"] is False]
++    assert dossier["verdict"] == "pass"
++
++
++def test_a_named_foreign_signer_that_is_not_the_declared_source_still_fails(
++    tmp_path, resolvable
++):
++    """The guard has to keep biting: a third key is a peer signing with someone else's.
++
++    Same production shape as the test above — the receipt names its signer — but the key
++    belongs to neither the peer nor the source hub its manifest declares. That is the
++    case `sandbox_key_mismatch` exists for, and reordering must not have softened it.
++    """
++    root = tmp_path / "routed-stranger-key"
++    root.mkdir()
++    db = HubDatabase(root / "hub.db")
++    signer = Signer(root / "key")
++    peer = Signer(root / "peer-key")
++    upstream = Signer(root / "upstream-key")
++    interloper = Signer(root / "interloper-key")
++    origin = "https://origin.example"
++    db.upsert_peer(Peer(url=origin, name="Origin", public_key=upstream.public_key_b64,
++                        trusted=True), status="active")
++    wk, manifest = _reexport_docs(peer, origin)
++
++    async def post_json(url, body, headers):
++        out = await _signed_post(interloper, url, body, headers)   # NOT the origin
++        out["json"]["receipt"]["signature"]["public_key"] = interloper.public_key_b64
++        out["json"]["routed_via"] = STRANGER
++        return out
++
++    dossier = _run(db, signer, wk, manifest, post_json)
++    mismatch = next(c for c in dossier["checks"] if c["id"] == "sandbox_key_mismatch")
++    assert mismatch["ok"] is False
++    receipt = next(c for c in dossier["checks"] if c["id"] == "sandbox_receipt_signed")
++    assert receipt["ok"] is False
++    assert dossier["verdict"] == "fail"
++
++
+ def test_a_routed_receipt_from_an_unknown_source_is_not_evidence(tmp_path, resolvable):
+     """The same reply, with the origin absent from our peer table, must NOT pass.
+ 
+diff --git a/tests/test_open_federation.py b/tests/test_open_federation.py
+index eae9dc1..05ff523 100644
+--- a/tests/test_open_federation.py
++++ b/tests/test_open_federation.py
+@@ -6,8 +6,10 @@ appearing buys it nothing: no indexing, no search hit, no route, no place in the
+ document this hub publishes to the rest of the network.
+ """
+ 
++import json
+ import time
+ from contextlib import contextmanager
++from pathlib import Path
+ 
+ import pytest
+ from fastapi.testclient import TestClient
+@@ -183,6 +185,51 @@ def test_preview_capabilities_are_never_searchable_or_indexed(monkeypatch, tmp_p
+         assert STRANGER not in blob
+ 
+ 
++def test_a_pending_row_separates_what_we_read_from_what_the_peer_claims(
++    monkeypatch, tmp_path, resolvable
++):
++    """Two counts, two meanings — the landing page renders both or it misreports one.
++
++    It used to publish only `preview_capabilities`, and the UI fell back through
++    `a || b || 0`. A knocking hub advertising 28 capabilities therefore printed
++    "claimed 0" on hub.attestedmemory.net: nothing previewed (closed door) and no
++    declared number in the payload to fall back to.
++    """
++    with _hub(monkeypatch, tmp_path, AIMARKET_FEDERATION_OPEN="1") as client:
++        db = client.hub_db  # type: ignore[attr-defined]
++        client.post("/ai-market/v2/federation/announce", json={"hub_url": STRANGER})
++
++        peer = db.get_peer(STRANGER)
++        peer.capabilities_count = 28          # what the peer says in its well-known
++        db.upsert_peer(peer, status="pending")
++
++        def row():
++            body = client.get("/ai-market/v2/federation/peers").json()
++            return next(r for r in body["pending"] if r["url"] == STRANGER)
++
++        # Nothing read yet: the claim survives on its own, and is not dressed up as ours.
++        assert row()["declared_capabilities"] == 28
++        assert row()["preview_capabilities"] == 0
++
++        db.replace_preview_capabilities(STRANGER, [
++            {"capability_id": "a@v1", "product_id": "p1"},
++            {"capability_id": "b@v1", "product_id": "p2"},
++        ])
++        assert row()["preview_capabilities"] == 2
++        assert row()["declared_capabilities"] == 28
++
++
++def test_the_knock_rail_strings_exist_in_every_pack():
++    """The rail is on the PUBLIC landing page, so a missing label ships an empty span."""
++    packs = json.loads(
++        (Path(__file__).parents[1] / "hub-ui-i18n.json").read_text(encoding="utf-8")
++    )["ui"]
++    needed = {"pending_caps", "pending_caps_read", "pending_show", "pending_note"}
++    for lang, pack in packs.items():
++        assert needed <= set(pack), lang
++        assert all(str(pack[k]).strip() for k in needed), lang
++
++
+ def test_approval_promotes_the_peer_and_drops_the_stale_preview(monkeypatch, tmp_path, resolvable):
+     with _hub(monkeypatch, tmp_path, AIMARKET_FEDERATION_OPEN="1") as client:
+         db = client.hub_db  # type: ignore[attr-defined]
+@@ -336,6 +383,101 @@ def test_preview_reads_a_real_signed_manifest(monkeypatch, tmp_path, resolvable)
+     assert db.find_by_capability_id("translate.multi@v2") is None
+ 
+ 
++def test_preview_works_with_the_open_door_closed(monkeypatch, tmp_path, resolvable):
++    """A closed-door hub still has pending peers, so it still needs the preview.
++
++    Measured on hub.attestedmemory.net (2026-09-08): four knocking hubs, all discovered
++    through the seed list and gossip rather than the open door, and every one of them
++    rendered "capabilities: 0" with an empty "Show what it offers" — because the preview
++    was gated on `federation_open` as well as its own switch. The operator was asked to
++    approve strangers with nothing to look at. Its own switch is the one that decides.
++    """
++    import asyncio
++
++    from aimarket_hub.config import HubConfig
++    from aimarket_hub.crawler import Crawler
++    from aimarket_hub.database import HubDatabase
++    from aimarket_hub.signing import Signer
++
++    monkeypatch.setenv("AIMARKET_FEDERATION_OPEN", "0")
++    root = tmp_path / "crawl-closed"
++    root.mkdir()
++    config = HubConfig()
++    config.db_path = str(root / "hub.db")
++    assert config.federation_open is False, "this test is about the CLOSED door"
++    db = HubDatabase(root / "hub.db")
++    signer = Signer(root / "key")
++
++    manifest = {
++        "protocol_version": "v1",
++        "capabilities_count": 1,
++        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
++        "tools": [
++            {"capability_id": "translate.multi@v2", "product_id": "p1", "name": "Translate",
++             "description": "translate text", "price_per_call_usd": 0.4,
++             "input_schema": {"type": "object"}, "output_schema": {"type": "object"}},
++        ],
++    }
++    manifest["signature"] = signer.sign_manifest(manifest)
++
++    crawler = Crawler(config=config, db=db, signer=signer)
++
++    class _Resp:
++        def json(self):
++            return manifest
++
++    async def _fake_get(url):
++        return _Resp()
++
++    monkeypatch.setattr(crawler, "_safe_get", _fake_get)
++    monkeypatch.setattr(crawler, "_manifest_too_stale", lambda m: False)
++
++    written = asyncio.run(
++        crawler._preview_pending_manifest(
++            {"manifest_url": "https://stranger.example/ai-market/manifest"},
++            "https://stranger.example",
++            signer.public_key_b64,
++        )
++    )
++    assert written == 1
++    assert db.count_preview_capabilities("https://stranger.example") == 1
++    # Quarantine is unchanged: a preview is still not a catalogue entry.
++    assert db.find_by_capability_id("translate.multi@v2") is None
++
++
++def test_preview_can_still_be_turned_off_on_its_own(monkeypatch, tmp_path, resolvable):
++    """`AIMARKET_FEDERATION_PREVIEW_CAPS=0` remains the way to refuse previews."""
++    import asyncio
++
++    from aimarket_hub.config import HubConfig
++    from aimarket_hub.crawler import Crawler
++    from aimarket_hub.database import HubDatabase
++    from aimarket_hub.signing import Signer
++
++    monkeypatch.setenv("AIMARKET_FEDERATION_PREVIEW_CAPS", "0")
++    root = tmp_path / "crawl-preview-off"
++    root.mkdir()
++    config = HubConfig()
++    config.db_path = str(root / "hub.db")
++    db = HubDatabase(root / "hub.db")
++    signer = Signer(root / "key")
++    crawler = Crawler(config=config, db=db, signer=signer)
++
++    async def _never(url):  # a refusal must not even fetch
++        raise AssertionError("preview fetched a manifest while switched off")
++
++    monkeypatch.setattr(crawler, "_safe_get", _never)
++    written = asyncio.run(
++        crawler._preview_pending_manifest(
++            {"manifest_url": "https://stranger.example/ai-market/manifest"},
++            "https://stranger.example",
++            signer.public_key_b64,
++        )
++    )
++    assert written == 0
++    assert db.count_preview_capabilities("https://stranger.example") == 0
++
++
+ def test_preview_refuses_a_manifest_that_fails_validation(monkeypatch, tmp_path, resolvable):
+     """§2.6(1): validate and verify exactly as for an admitted peer, before displaying.
+ 
+diff --git a/tests/test_production_storage.py b/tests/test_production_storage.py
+new file mode 100644
+index 0000000..1a85be8
+--- /dev/null
++++ b/tests/test_production_storage.py
+@@ -0,0 +1,69 @@
++import pytest
++
++from aimarket_hub.storage import assert_production_postgres
++
++
++DSNS = (
++    "DATABASE_URL", "AIMARKET_CHANNELS_DATABASE_URL", "AIMARKET_SANDBOX_DATABASE_URL",
++    "AIMARKET_ACEX_IPO_DATABASE_URL", "AIMARKET_ACEX_AUDIT_DATABASE_URL",
++    "AIMARKET_ZK_DATABASE_URL", "AIMARKET_ESCROW_DATABASE_URL", "AIFACTORY_DATABASE_URL",
++)
++
++
++def configure_secure_production(monkeypatch):
++    monkeypatch.setenv("AIFACTORY_PROD", "1")
++    for name in DSNS:
++        monkeypatch.setenv(name, "postgresql://user:secret@db/app")
++    for name in ("AIMARKET_CAPABILITY_TOKEN", "AIMARKET_ADMIN_TOKEN", "AIMARKET_TEAM_AUTH_SECRET"):
++        monkeypatch.setenv(name, "x" * 32)
++    monkeypatch.setenv("AIMARKET_PUBLISHER_TOKENS", "memory-market:" + "y" * 32)
++    monkeypatch.setenv("AIMARKET_PQC_REQUIRE", "1")
++    monkeypatch.setenv("AIMARKET_SUPPLY_REQUIRE_RESPONSE_SIG", "1")
++    for name in (
++        "AIMARKET_SUPPLY_SECURITY_RELAXED", "AIMARKET_SANDBOX_STUB_INVOKE",
++        "AIMARKET_ZK_SIMULATED", "AIMARKET_TEE_SOFTWARE_OK",
++        "AIFACTORY_PAYMENT_VERIFY_STUB", "AIFACTORY_PAYMENT_TESTNET",
++    ):
++        monkeypatch.setenv(name, "0")
++
++
++def test_secure_production_profile_is_accepted(monkeypatch):
++    configure_secure_production(monkeypatch)
++    assert_production_postgres()
++
++
++def test_sqlite_and_relaxed_security_are_rejected(monkeypatch):
++    configure_secure_production(monkeypatch)
++    monkeypatch.setenv("AIMARKET_ZK_DATABASE_URL", "sqlite:///unsafe.db")
++    with pytest.raises(RuntimeError, match="PostgreSQL DSNs"):
++        assert_production_postgres()
++
++    configure_secure_production(monkeypatch)
++    monkeypatch.delenv("AIFACTORY_DATABASE_URL")
++    with pytest.raises(RuntimeError, match="AIFACTORY_DATABASE_URL"):
++        assert_production_postgres()
++
++    configure_secure_production(monkeypatch)
++    monkeypatch.setenv("AIMARKET_SUPPLY_SECURITY_RELAXED", "1")
++    with pytest.raises(RuntimeError, match="unsafe development flags"):
++        assert_production_postgres()
++
++    configure_secure_production(monkeypatch)
++    monkeypatch.delenv("AIFACTORY_PAYMENT_TESTNET")
++    with pytest.raises(RuntimeError, match="must be explicitly disabled"):
++        assert_production_postgres()
++
++
++def test_local_publish_requires_safe_gateway_allowlist(monkeypatch):
++    configure_secure_production(monkeypatch)
++    monkeypatch.setenv("AIMARKET_ALLOW_LOCAL_PUBLISH", "1")
++    monkeypatch.setenv("AIMARKET_INVOKE_HOST_GATEWAY", "memory-market,*")
++    with pytest.raises(RuntimeError, match="safe AIMARKET_INVOKE_HOST_GATEWAY"):
++        assert_production_postgres()
++
++
++def test_operator_publishers_require_a_publisher_credential(monkeypatch):
++    configure_secure_production(monkeypatch)
++    monkeypatch.setenv("AIMARKET_SUPPLY_OPERATOR_PUBLISHERS", "unknown-provider")
++    with pytest.raises(RuntimeError, match="operator publishers require"):
++        assert_production_postgres()
+diff --git a/tests/test_supply_security.py b/tests/test_supply_security.py
+index 6de9f4e..253391c 100644
+--- a/tests/test_supply_security.py
++++ b/tests/test_supply_security.py
+@@ -165,6 +165,25 @@ class TestSupplySecurityUnit:
+             pub_id, _ = sec.validate_publish(body)
+             assert pub_id == "pub-wallet-1"
+ 
++    def test_operator_publisher_bypasses_only_collateral_gate(self, tmp_path, monkeypatch):
++        monkeypatch.setenv("AIMARKET_SUPPLY_SECURITY_RELAXED", "0")
++        monkeypatch.setenv("AIMARKET_SUPPLY_MIN_STAKE_USD", "25")
++        monkeypatch.setenv("AIMARKET_SUPPLY_OPERATOR_PUBLISHERS", "pub-wallet-1")
++        monkeypatch.setenv("AIMARKET_ORACLE_FAMILY_URL", "off")
++        db = HubDatabase(tmp_path / "operator.db")
++        sec = SupplySecurity(db, HubConfig(), signer=Signer(tmp_path / "k"))
++
++        assert sec.validate_publish({**MANIFEST, "provider_pubkey": "dGVzdA=="})[0] == "pub-wallet-1"
++        with pytest.raises(ValueError, match="minimum stake"):
++            sec.validate_publish({
++                **MANIFEST,
++                "product_id": "external-product",
++                "capability_id": "external.capability@v1",
++                "invoke_url": "http://127.0.0.1:3458/invoke",
++                "publisher_id": "external-publisher",
++                "provider_pubkey": "dGVzdA==",
++            })
++
+     def test_sanitize_blocks_secrets(self, tmp_path):
+         db = HubDatabase(tmp_path / "san.db")
+         sec = SupplySecurity(db, HubConfig(), signer=Signer(tmp_path / "k"))

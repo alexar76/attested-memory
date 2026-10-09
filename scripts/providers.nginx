@@ -1,0 +1,95 @@
+
+# ── Attested providers: DISCOVERY ONLY ────────────────────────────────────────
+# These three services were loopback-only, and most of each one stays that way. What is
+# published here is exactly what a stranger needs in order to READ them: the well-known,
+# the signed manifest, and the API docs. Nothing that writes, nothing that invokes,
+# nothing that authenticates — each provider holds an API key, a publisher token and a
+# payment desk on Base, and none of that gains anything from being reachable. Invokes
+# still arrive the way they always have: through the hub, over the container network.
+#
+# `location = ` and `location ^~ ` only. A bare prefix would expose everything under it,
+# which is how "just the manifest" becomes the whole app.
+#
+# Each name gets BOTH listeners, written out here rather than left to `certbot --nginx`.
+# Certbot expanded the certificate and installed TLS into nothing, because these blocks
+# carried no `ssl_certificate` for it to replace — so HTTPS for all three names fell
+# through to the first :443 vhost (the landing page) and every provider path answered 404
+# over TLS while working perfectly over plain HTTP.
+
+server {
+  server_name memory.attestedmemory.net;
+  location ^~ /.well-known/acme-challenge/ { root /var/www/letsencrypt; }
+  location = /.well-known/ai-market.json  { proxy_pass http://127.0.0.1:8810; include /etc/nginx/snippets/attested-provider-proxy.conf; }
+  location = /ai-market/v2/manifest       { proxy_pass http://127.0.0.1:8810; include /etc/nginx/snippets/attested-provider-proxy.conf; }
+  location = /docs                        { proxy_pass http://127.0.0.1:8810; include /etc/nginx/snippets/attested-provider-proxy.conf; }
+  location = /openapi.json                { proxy_pass http://127.0.0.1:8810; include /etc/nginx/snippets/attested-provider-proxy.conf; }
+  location = / { return 302 https://attestedmemory.net/memory/; }
+  location / { return 404; }
+
+  listen 443 ssl;
+  listen [::]:443 ssl;
+  ssl_certificate /etc/letsencrypt/live/attestedmemory.net/fullchain.pem;
+  ssl_certificate_key /etc/letsencrypt/live/attestedmemory.net/privkey.pem;
+  include /etc/letsencrypt/options-ssl-nginx.conf;
+  ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+}
+
+server {
+  server_name memory.attestedmemory.net;
+  listen 80;
+  listen [::]:80;
+  location ^~ /.well-known/acme-challenge/ { root /var/www/letsencrypt; }
+  location / { return 301 https://$host$request_uri; }
+}
+
+server {
+  server_name truth.attestedmemory.net;
+  location ^~ /.well-known/acme-challenge/ { root /var/www/letsencrypt; }
+  location = /.well-known/ai-market.json  { proxy_pass http://127.0.0.1:8811; include /etc/nginx/snippets/attested-provider-proxy.conf; }
+  location = /ai-market/v2/manifest       { proxy_pass http://127.0.0.1:8811; include /etc/nginx/snippets/attested-provider-proxy.conf; }
+  location = /docs                        { proxy_pass http://127.0.0.1:8811; include /etc/nginx/snippets/attested-provider-proxy.conf; }
+  location = /openapi.json                { proxy_pass http://127.0.0.1:8811; include /etc/nginx/snippets/attested-provider-proxy.conf; }
+  location = / { return 302 https://attestedmemory.net/; }
+  location / { return 404; }
+
+  listen 443 ssl;
+  listen [::]:443 ssl;
+  ssl_certificate /etc/letsencrypt/live/attestedmemory.net/fullchain.pem;
+  ssl_certificate_key /etc/letsencrypt/live/attestedmemory.net/privkey.pem;
+  include /etc/letsencrypt/options-ssl-nginx.conf;
+  ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+}
+
+server {
+  server_name truth.attestedmemory.net;
+  listen 80;
+  listen [::]:80;
+  location ^~ /.well-known/acme-challenge/ { root /var/www/letsencrypt; }
+  location / { return 301 https://$host$request_uri; }
+}
+
+server {
+  server_name provenance.attestedmemory.net;
+  location ^~ /.well-known/acme-challenge/ { root /var/www/letsencrypt; }
+  location = /.well-known/ai-market.json  { proxy_pass http://127.0.0.1:8812; include /etc/nginx/snippets/attested-provider-proxy.conf; }
+  location = /ai-market/v2/manifest       { proxy_pass http://127.0.0.1:8812; include /etc/nginx/snippets/attested-provider-proxy.conf; }
+  location = /docs                        { proxy_pass http://127.0.0.1:8812; include /etc/nginx/snippets/attested-provider-proxy.conf; }
+  location = /openapi.json                { proxy_pass http://127.0.0.1:8812; include /etc/nginx/snippets/attested-provider-proxy.conf; }
+  location = / { return 302 https://attestedmemory.net/; }
+  location / { return 404; }
+
+  listen 443 ssl;
+  listen [::]:443 ssl;
+  ssl_certificate /etc/letsencrypt/live/attestedmemory.net/fullchain.pem;
+  ssl_certificate_key /etc/letsencrypt/live/attestedmemory.net/privkey.pem;
+  include /etc/letsencrypt/options-ssl-nginx.conf;
+  ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+}
+
+server {
+  server_name provenance.attestedmemory.net;
+  listen 80;
+  listen [::]:80;
+  location ^~ /.well-known/acme-challenge/ { root /var/www/letsencrypt; }
+  location / { return 301 https://$host$request_uri; }
+}

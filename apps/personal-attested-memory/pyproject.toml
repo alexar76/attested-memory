@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "personal-attested-memory"
+version = "1.0.0"
+license = { file = "LICENSE" }
+requires-python = ">=3.11"
+dependencies = ["fastapi>=0.115,<1", "httpx>=0.28,<1", "uvicorn>=0.34,<1"]
+[project.optional-dependencies]
+dev = ["pytest>=8.3,<9"]
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,63 @@
+--- a/aimarket_hub/federation_assay.py
++++ b/aimarket_hub/federation_assay.py
+@@ -52,4 +52,49 @@
+ SANDBOX_INPUT: dict[str, Any] = {}
+-
+-HARD_CHECKS = (
++
++_SANDBOX_PLACEHOLDER_ADDRESS = "0x0000000000000000000000000000000000000001"
++
++
++def sandbox_input_for_tool(tool: dict[str, Any]) -> dict[str, Any]:
++    """Build a minimal legal ``input`` from the capability's published schema.
++
++    Empty ``{}`` was fine while peers soft-refused missing fields over HTTP 200. Peers that
++    correctly answer 400 for schema violations (CHARON now does) would otherwise fail every
++    assay. Fill only ``required`` keys — never invent optional knobs.
++    """
++    schema = tool.get("input_schema") if isinstance(tool.get("input_schema"), dict) else {}
++    props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
++    required = schema.get("required") if isinstance(schema.get("required"), list) else []
++    if not required:
++        return dict(SANDBOX_INPUT)
++    out: dict[str, Any] = {}
++    for key in required:
++        name = str(key)
++        spec = props.get(name) if isinstance(props.get(name), dict) else {}
++        enum = spec.get("enum")
++        if isinstance(enum, list) and enum:
++            out[name] = enum[0]
++            continue
++        typ = spec.get("type")
++        low = name.lower()
++        desc = str(spec.get("description") or "").lower()
++        if "address" in low or "0x" in desc or "borrower" in desc:
++            out[name] = _SANDBOX_PLACEHOLDER_ADDRESS
++        elif typ == "boolean":
++            out[name] = False
++        elif typ == "integer":
++            out[name] = 0
++        elif typ == "number":
++            out[name] = 0.0
++        elif typ == "array":
++            out[name] = []
++        elif typ == "object":
++            out[name] = {}
++        elif "chain" in low:
++            out[name] = "base"
++        else:
++            out[name] = "sandbox"
++    return out
++
++
++HARD_CHECKS = (
+     "url_public",
+@@ -1015,7 +1060,7 @@
+     body = {
+         "capability_id": cap_id,
+         "product_id": product_id,
+-        "input": SANDBOX_INPUT,
++        "input": sandbox_input_for_tool(tool),
+     }
+     if source_hub:
+         body["source_hub"] = source_hub

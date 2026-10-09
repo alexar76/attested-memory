@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://attested-memory.local/contracts/memory-unit.schema.json",
+  "title": "Memory Unit",
+  "type": "object",
+  "required": ["id", "content_hash", "owner_id", "visibility", "created_at"],
+  "properties": {
+    "id": { "type": "string", "pattern": "^mem_[a-f0-9]{24}$" },
+    "content": { "type": ["string", "null"] },
+    "content_hash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "owner_id": { "type": "string", "minLength": 1, "maxLength": 120 },
+    "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "tags": { "type": "array", "items": { "type": "string", "maxLength": 48 }, "maxItems": 20 },
+    "visibility": { "enum": ["private", "shared", "public", "paid"] },
+    "price_usdc": { "type": ["string", "null"], "pattern": "^[0-9]+(\\.[0-9]{1,6})?$" },
+    "truth": {
+      "type": "object",
+      "properties": {
+        "status": { "enum": ["unverified", "supported", "contested", "rejected"] },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "evidence_pack_id": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "provenance": {
+      "type": "object",
+      "properties": {
+        "receipt_id": { "type": ["string", "null"] },
+        "lineage_root": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "created_at": { "type": "string", "format": "date-time" }
+  },
+  "additionalProperties": false
+}
