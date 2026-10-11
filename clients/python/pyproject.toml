@@ -31,3 +31,8 @@ attested-memory = "attested_memory.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/attested_memory"]
+
+# An explicit file set (and the package's own .gitignore): without it hatchling walks up to the
+# monorepo's .gitignore and ships it in the sdist, which the publish gate refuses.
+[tool.hatch.build.targets.sdist]
+include = ["/src/attested_memory", "/tests", "/README.md", "/LICENSE", "/pyproject.toml", "/.gitignore"]
