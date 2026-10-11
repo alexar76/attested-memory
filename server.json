@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.alexar76/attested-memory",
   "title": "Attested Memory Market",
-  "description": "Discover and invoke attestable memory, truth and provenance capabilities. Hybrid Ed25519 + ML-DSA-65 receipts; direct USDC settlement on Base.",
+  "description": "Attestable memory, truth, provenance. Hybrid Ed25519 + ML-DSA-65 receipts; USDC settlement on Base.",
   "repository": {
     "url": "https://github.com/alexar76/attested-memory",
     "source": "github"
