@@ -16,6 +16,24 @@ except Exception:  # pragma: no cover
     ML_DSA_65 = None
 
 
+# Ed25519 points of small order (orders 1, 2, 4, 8; sign bit cleared), as libsodium checks them.
+# `cryptography` (OpenSSL) accepts, under such a key, a signature valid for EVERY message, and no
+# secret exists for these keys — so a key or R among them is refused before verifying. 2026-10-12.
+_ED25519_SMALL_ORDER = frozenset(bytes.fromhex(h) for h in (
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "0100000000000000000000000000000000000000000000000000000000000000",
+    "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+    "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+    "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+))
+
+
+def _ed25519_small_order(point: bytes) -> bool:
+    return len(point) == 32 and (point[:31] + bytes([point[31] & 0x7F])) in _ED25519_SMALL_ORDER
+
+
 def _enabled(name: str) -> bool:
     return os.getenv(name, "0").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -109,9 +127,10 @@ class Signer:
             return base64.urlsafe_b64decode(item + "=" * (-len(item) % 4))
 
         try:
-            Ed25519PublicKey.from_public_bytes(decode(public_key)).verify(
-                decode(signature), value.encode("ascii")
-            )
+            key, sig = decode(public_key), decode(signature)
+            if _ed25519_small_order(key) or _ed25519_small_order(sig[:32]):
+                return False
+            Ed25519PublicKey.from_public_bytes(key).verify(sig, value.encode("ascii"))
             return True
         except (InvalidSignature, ValueError):
             return False

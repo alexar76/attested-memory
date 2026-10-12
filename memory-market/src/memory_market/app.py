@@ -40,6 +40,24 @@ SERVICE_MAP = (
 )
 
 
+# Ed25519 points of small order (orders 1, 2, 4, 8; sign bit cleared), as libsodium checks them.
+# `cryptography` (OpenSSL) accepts, under such a key, a signature valid for EVERY message, and no
+# secret exists for these keys — so a key or R among them is refused before verifying. 2026-10-12.
+_ED25519_SMALL_ORDER = frozenset(bytes.fromhex(h) for h in (
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "0100000000000000000000000000000000000000000000000000000000000000",
+    "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+    "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+    "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+))
+
+
+def _ed25519_small_order(point: bytes) -> bool:
+    return len(point) == 32 and (point[:31] + bytes([point[31] & 0x7F])) in _ED25519_SMALL_ORDER
+
+
 @lru_cache
 def provider_signer() -> ProviderSigner:
     return ProviderSigner(get_settings().provider_key_file)
@@ -185,6 +203,9 @@ def _production_actor(
     raw_key = _b64url((public_key or "").strip(), "public key")
     raw_signature = _b64url((signature or "").strip(), "signature")
     if len(raw_key) != 32 or len(raw_signature) != 64:
+        raise HTTPException(status_code=401, detail="invalid actor identity key material")
+    if _ed25519_small_order(raw_key) or _ed25519_small_order(raw_signature[:32]):
+        # A small-order key has no secret: anybody could act as this actor.
         raise HTTPException(status_code=401, detail="invalid actor identity key material")
     expected_id = hashlib.sha256(raw_key).hexdigest()
     if not hmac.compare_digest(actor_id[10:], expected_id):
