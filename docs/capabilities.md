@@ -32,4 +32,4 @@ operator choices; a provider cannot approve itself or spend a marketing budget.
 
 The public integration and manifest-builder workflow is documented at
 `https://attestedmemory.net/developers` and in the localized
-`docs/i18n/*/DEVELOPER_GUIDE.md` files.
+`attested/docs/i18n/*/DEVELOPER_GUIDE.md` files.
