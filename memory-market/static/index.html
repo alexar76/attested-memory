@@ -33,7 +33,7 @@
           <div class="top-actions">
             <span class="security-pill"><i></i> PQC enforced</span>
             <a class="wallet-rail" href="#market"><i></i><span>Base / USDC</span></a>
-            <label class="actor-field">Actor <input id="actor" placeholder="did:actor:…" autocomplete="off" /></label>
+            <label class="actor-field">Actor <input id="actor" readonly placeholder="did:actor:…" autocomplete="off" /></label>
             <button class="button primary" id="open-create">Write memory <span aria-hidden="true">+</span></button>
           </div>
         </header>
@@ -131,9 +131,7 @@
       </div>
       <form id="create-form">
         <label>API key<input id="api-key" type="password" required placeholder="Operator key" autocomplete="off" /></label>
-        <label>Actor public key<input id="actor-public-key" required placeholder="base64url Ed25519 public key" autocomplete="off" /></label>
-        <label>Actor signature<input id="actor-signature" required placeholder="base64url signature over Actor ID" autocomplete="off" /></label>
-        <label>Owner ID<input id="owner-id" required placeholder="did:actor:…" autocomplete="off" /></label>
+        <label>Owner ID<input id="owner-id" readonly required placeholder="did:actor:…" autocomplete="off" /></label>
         <label>Title<input id="title" required maxlength="200" placeholder="What should agents recognize?" /></label>
         <label>Content<textarea id="content" required rows="8" placeholder="The durable knowledge, decision or finding…"></textarea></label>
         <div class="form-row">
@@ -171,6 +169,7 @@
         <p class="form-message" id="payment-message" role="status">Waiting for a finalized transfer…</p>
       </div>
     </aside>
+    <script src="/actor.js" defer></script>
     <script src="/app.js" defer></script>
   </body>
 </html>

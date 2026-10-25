@@ -32,8 +32,13 @@ What is checked where:
 | the text of a memory matches its `content_hash` | **this client** |
 | `truth` (supported / contested / rejected) and `provenance` (attested receipt) | reported by the hub |
 
-The proof is a signature over `<actor id>\n<unix seconds>\n<nonce>`: good for five minutes and
-one request, so a captured header set replays nowhere.
+Actor proof v2 binds the recipient audience, method, final path, ordered query
+pairs and SHA-256 of the exact body bytes. A captured proof cannot authorize a
+different request. Nonces are persisted by the service, including across worker
+restarts. `Client` handles these targets automatically; direct callers must pass
+`audience`, `method`, `path` and the exact `body` bytes to `Actor.proof_headers`.
+Legacy identity-only proofs are refused. See the
+[wire contract](../../../docs/actor-request-proofs-v2.md).
 
 Environment for the CLI: `ATTESTED_MEMORY_HOME`, `ATTESTED_MEMORY_URL`, `ATTESTED_MEMORY_API_KEY`.
 

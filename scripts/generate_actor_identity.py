@@ -11,6 +11,7 @@ import argparse
 import base64
 import hashlib
 import json
+import os
 from pathlib import Path
 
 from cryptography.hazmat.primitives import serialization
@@ -34,10 +35,11 @@ def main() -> None:
     raw_public = private.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
     actor = "did:actor:" + hashlib.sha256(raw_public).hexdigest()
     args.private_key.parent.mkdir(parents=True, exist_ok=True)
-    args.private_key.write_text(b64(raw_private) + "\n", encoding="ascii")
-    args.private_key.chmod(0o600)
+    fd = os.open(args.private_key, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="ascii") as stream:
+        stream.write(b64(raw_private) + "\n")
     print(json.dumps({"actor_id": actor, "public_key": b64(raw_public), "label": args.actor_id}, indent=2))
-    print("Sign the exact actor_id string with the private key and send base64url signature in X-Actor-Signature.")
+    print("Use Actor.proof_headers(audience=..., method=..., path=..., body=...) from the Python client. Legacy identity-only signatures are refused.")
 
 
 if __name__ == "__main__":

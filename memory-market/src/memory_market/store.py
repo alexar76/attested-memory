@@ -33,6 +33,11 @@ class MemoryStore:
         with self.connection:
             self.connection.executescript(
                 """
+                CREATE TABLE IF NOT EXISTS actor_proof_nonces_v2 (
+                    audience TEXT NOT NULL, actor_id TEXT NOT NULL, nonce TEXT NOT NULL, expires_at BIGINT NOT NULL,
+                    PRIMARY KEY (audience, actor_id, nonce)
+                );
+                CREATE INDEX IF NOT EXISTS idx_actor_proof_expiry ON actor_proof_nonces_v2(expires_at);
                 CREATE TABLE IF NOT EXISTS memories (
                     id TEXT PRIMARY KEY,
                     title TEXT NOT NULL,

@@ -113,7 +113,9 @@ def _actor_headers(request: Request) -> dict[str, str]:
                            ("x-actor-public-key", "X-Actor-Public-Key"),
                            ("x-actor-timestamp", "X-Actor-Timestamp"),
                            ("x-actor-nonce", "X-Actor-Nonce"),
-                           ("x-actor-signature", "X-Actor-Signature")):
+                           ("x-actor-signature", "X-Actor-Signature"),
+                           ("x-actor-version", "X-Actor-Version"),
+                           ("x-actor-intent", "X-Actor-Intent")):
         value = request.headers.get(source)
         if value:
             forwarded[target] = value

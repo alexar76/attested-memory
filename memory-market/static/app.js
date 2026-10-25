@@ -1,8 +1,6 @@
 const catalog = document.querySelector("#catalog");
 const searchForm = document.querySelector("#search-form");
 const actorInput = document.querySelector("#actor");
-const actorPublicKeyInput = document.querySelector("#actor-public-key");
-const actorSignatureInput = document.querySelector("#actor-signature");
 const drawer = document.querySelector("#create-drawer");
 const scrim = document.querySelector("#scrim");
 const createForm = document.querySelector("#create-form");
@@ -15,14 +13,14 @@ const paymentMessage = document.querySelector("#payment-message");
 let currentOrder = null;
 let checkoutPoll = null;
 
-function headers(includeAuth = false) {
+async function headers(path, options = {}, includeAuth = false) {
   const result = { "Content-Type": "application/json" };
-  const actor = actorInput.value.trim();
-  if (actor) result["X-Actor-ID"] = actor;
-  if (actorPublicKeyInput?.value.trim()) result["X-Actor-Public-Key"] = actorPublicKeyInput.value.trim();
-  if (actorSignatureInput?.value.trim()) result["X-Actor-Signature"] = actorSignatureInput.value.trim();
   const apiKey = document.querySelector("#api-key")?.value.trim();
-  if (includeAuth || apiKey) result.Authorization = `Bearer ${apiKey}`;
+  if (includeAuth || apiKey) {
+    Object.assign(result, await AttestedActor.headers(path, { ...options, audience: "memory-market" }));
+    actorInput.value = result["X-Actor-ID"];
+    result.Authorization = `Bearer ${apiKey || ""}`;
+  }
   return result;
 }
 
@@ -73,7 +71,7 @@ function memoryCard(memory) {
 async function loadCatalog(query = "") {
   catalog.replaceChildren(element("div", "empty", "Loading memory units…"));
   try {
-    const response = await fetch(`/v1/catalog?q=${encodeURIComponent(query)}`, { headers: headers() });
+    const response = await fetch(`/v1/catalog?q=${encodeURIComponent(query)}`, { redirect: "error", headers: await headers(`/v1/catalog?q=${encodeURIComponent(query)}`) });
     if (!response.ok) throw new Error("Catalogue unavailable");
     const data = await response.json();
     document.querySelector("#result-count").textContent = `${data.total} accessible record${data.total === 1 ? "" : "s"}`;
@@ -94,7 +92,7 @@ async function loadCatalog(query = "") {
 async function loadStatus() {
   try {
     const [healthResponse, statsResponse, networkResponse] = await Promise.all([
-      fetch("/healthz"), fetch("/v1/stats", { headers: headers() }), fetch("/v1/network"),
+      fetch("/healthz"), fetch("/v1/stats"), fetch("/v1/network"),
     ]);
     const health = await healthResponse.json();
     const stats = await statsResponse.json();
@@ -209,7 +207,7 @@ function renderOrder(order) {
 async function refreshOrder() {
   if (!currentOrder || !checkoutDrawer.classList.contains("open")) return;
   try {
-    const response = await fetch(`/v1/billing/orders/${encodeURIComponent(currentOrder.order_id)}`, { headers: headers(true) });
+    const response = await fetch(`/v1/billing/orders/${encodeURIComponent(currentOrder.order_id)}`, { redirect: "error", headers: await headers(`/v1/billing/orders/${encodeURIComponent(currentOrder.order_id)}`, {}, true) });
     const result = await response.json();
     if (!response.ok) throw new Error(result.detail || "Could not refresh payment order");
     renderOrder(result);
@@ -228,7 +226,8 @@ function scheduleOrderPoll() {
 }
 
 async function beginCheckout(memory) {
-  const actor = actorInput.value.trim();
+  const actor = await AttestedActor.actorId();
+  actorInput.value = actor;
   if (!actor) {
     document.querySelector("#node-status").textContent = "Enter an Actor ID before checkout";
     actorInput.focus();
@@ -243,9 +242,9 @@ async function beginCheckout(memory) {
   checkoutOrder.hidden = true;
   openCheckout();
   try {
+    const body = JSON.stringify({ memory_id: memory.id, grantee_id: actor });
     const response = await fetch("/v1/billing/orders", {
-      method: "POST", headers: headers(true),
-      body: JSON.stringify({ memory_id: memory.id, grantee_id: actor }),
+      method: "POST", redirect: "error", headers: await headers("/v1/billing/orders", {method: "POST", body}, true), body,
     });
     const result = await response.json();
     if (!response.ok) throw new Error(result.detail || "Could not create payment order");
@@ -290,9 +289,10 @@ document.querySelector("#confirm-payment-form").addEventListener("submit", async
   paymentMessage.className = "form-message";
   paymentMessage.textContent = "Checking the transfer and confirmation depth…";
   try {
-    const response = await fetch(`/v1/billing/orders/${encodeURIComponent(currentOrder.order_id)}/confirm`, {
-      method: "POST", headers: headers(true),
-      body: JSON.stringify({ tx_hash: document.querySelector("#payment-tx").value.trim() }),
+    const path = `/v1/billing/orders/${encodeURIComponent(currentOrder.order_id)}/confirm`;
+    const body = JSON.stringify({ tx_hash: document.querySelector("#payment-tx").value.trim() });
+    const response = await fetch(path, {
+      method: "POST", redirect: "error", headers: await headers(path, {method: "POST", body}, true), body,
     });
     const result = await response.json();
     if (!response.ok) throw new Error(result.detail || "Transaction could not be verified");
@@ -308,7 +308,7 @@ document.querySelector("#confirm-payment-form").addEventListener("submit", async
 createForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const message = document.querySelector("#form-message");
-  const owner = document.querySelector("#owner-id").value.trim();
+  const owner = await AttestedActor.actorId();
   actorInput.value = owner;
   const body = {
     title: document.querySelector("#title").value,
@@ -321,7 +321,8 @@ createForm.addEventListener("submit", async (event) => {
   message.className = "form-message";
   message.textContent = "Writing and requesting attestation…";
   try {
-    const response = await fetch("/v1/memories", { method: "POST", headers: headers(true), body: JSON.stringify(body) });
+    const encoded = JSON.stringify(body);
+    const response = await fetch("/v1/memories", { method: "POST", redirect: "error", headers: await headers("/v1/memories", {method: "POST", body: encoded}, true), body: encoded });
     const result = await response.json();
     if (!response.ok) throw new Error(result.detail || "Could not create memory");
     message.textContent = `Created ${result.id} · ${result.provenance.status}`;
@@ -337,3 +338,5 @@ createForm.addEventListener("submit", async (event) => {
 
 loadCatalog();
 loadStatus();
+
+AttestedActor.actorId().then((actor) => { actorInput.value = actor; document.querySelector("#owner-id").value = actor; }).catch(() => {});

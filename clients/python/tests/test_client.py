@@ -54,6 +54,12 @@ class Fake(BaseHTTPRequestHandler):
 
     def do_GET(self):
         self._record()
+        if self.path == "/memory/api/memories/redirect":
+            self.send_response(302)
+            self.send_header("Location", "/credential-capture")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         if self.path.startswith("/memory/api/search"):
             return self._reply(200, {"items": [], "total": 0, "query": "x"})
         if self.path == "/memory/api/memories/mem_1":
@@ -117,3 +123,11 @@ def test_cli_init_trial_write(server, tmp_path, monkeypatch, capsys):
     assert stat.S_IMODE(os.stat(tmp_path / "key.json").st_mode) == 0o600
     assert main(["--url", server, "write", "Title", "Body", "--tag", "a"]) == 0
     assert '"id": "mem_1"' in capsys.readouterr().out
+
+
+def test_redirect_cannot_forward_actor_proof_or_bearer_credentials(server):
+    client = Client(Actor.generate(), "synthetic-private-api-key", base_url=server)
+    with pytest.raises(AttestedMemoryError) as error:
+        client.read("redirect")
+    assert error.value.status == 302
+    assert [entry["path"] for entry in Fake.seen] == ["/memory/api/memories/redirect"]

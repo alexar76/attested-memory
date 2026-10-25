@@ -110,6 +110,8 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Attested Memory Market", version="0.2.0", lifespan=lifespan)
+from .actor_auth import ActorProofBody
+app.add_middleware(ActorProofBody)
 
 
 def team_context(
@@ -153,75 +155,17 @@ def _b64url(value: str, label: str) -> bytes:
     return decoded
 
 
-_ACTOR_PROOF_MAX_SKEW_S = 300
-_ACTOR_NONCE_TTL_S = 900
-_ACTOR_NONCE_RE = re.compile(r"^[A-Za-z0-9_-]{16,64}$")
-_actor_nonces: dict[tuple[str, str], float] = {}
-
-
-def _spend_actor_nonce(actor_id: str, nonce: str, now: float) -> bool:
-    if len(_actor_nonces) > 200_000:
-        cutoff = now - _ACTOR_NONCE_TTL_S
-        for key in [k for k, t in _actor_nonces.items() if t <= cutoff]:
-            _actor_nonces.pop(key, None)
-    stamp = _actor_nonces.get((actor_id, nonce))
-    if stamp is not None and now - stamp < _ACTOR_NONCE_TTL_S:
-        return False
-    _actor_nonces[(actor_id, nonce)] = now
-    return True
-
-
-def _production_actor(
-    actor_id: str, authorization: str | None, signature: str | None,
-    public_key: str | None, settings: Settings,
-    timestamp: str | None = None, nonce: str | None = None,
-) -> str:
-    """Actor proof = signature over ``<actor id>\n<unix seconds>\n<nonce>``.
-
-    Same wire format as attested_*.core.verified_actor and the SaaS gateway. The proof
-    reaches this service through the product proxies, which forward the five actor
-    headers verbatim; a captured set is good for five minutes and exactly one use.
-    """
-    expected_authorization = f"Bearer {settings.api_key}"
-    if not authorization or not hmac.compare_digest(authorization, expected_authorization):
-        raise HTTPException(status_code=401, detail="authenticated actor required")
-    if not actor_id.startswith("did:actor:") or len(actor_id) != 74:
-        raise HTTPException(status_code=401, detail="actor id must be a cryptographic did:actor identity")
-    timestamp = (timestamp or "").strip()
-    nonce = (nonce or "").strip()
-    if not timestamp or not nonce:
-        raise HTTPException(status_code=401, detail="actor proof needs X-Actor-Timestamp and X-Actor-Nonce")
-    if not _ACTOR_NONCE_RE.fullmatch(nonce):
-        raise HTTPException(status_code=401, detail="actor nonce must be 16-64 url-safe characters")
-    now = time.time()
-    try:
-        issued = int(timestamp)
-    except ValueError:
-        raise HTTPException(status_code=401, detail="actor timestamp must be unix seconds")
-    if abs(now - issued) > _ACTOR_PROOF_MAX_SKEW_S:
-        raise HTTPException(status_code=401, detail="actor proof is stale or from the future")
-    raw_key = _b64url((public_key or "").strip(), "public key")
-    raw_signature = _b64url((signature or "").strip(), "signature")
-    if len(raw_key) != 32 or len(raw_signature) != 64:
-        raise HTTPException(status_code=401, detail="invalid actor identity key material")
-    if _ed25519_small_order(raw_key) or _ed25519_small_order(raw_signature[:32]):
-        # A small-order key has no secret: anybody could act as this actor.
-        raise HTTPException(status_code=401, detail="invalid actor identity key material")
-    expected_id = hashlib.sha256(raw_key).hexdigest()
-    if not hmac.compare_digest(actor_id[10:], expected_id):
-        raise HTTPException(status_code=401, detail="actor id is not bound to the public key")
-    try:
-        Ed25519PublicKey.from_public_bytes(raw_key).verify(
-            raw_signature, f"{actor_id}\n{timestamp}\n{nonce}".encode()
-        )
-    except (InvalidSignature, ValueError):
-        raise HTTPException(status_code=401, detail="signed actor identity required")
-    if not _spend_actor_nonce(actor_id, nonce, now):
-        raise HTTPException(status_code=401, detail="actor proof already used")
-    return actor_id
+def _production_actor(request: Request, settings: Settings) -> str:
+    from .actor_auth import verify_actor_request
+    authorization = request.headers.get("authorization", "")
+    if not hmac.compare_digest(authorization, f"Bearer {settings.api_key}"):
+        raise HTTPException(401, "authenticated actor required")
+    return verify_actor_request(request, audience=os.getenv("MEMORY_MARKET_ACTOR_AUDIENCE", "memory-market"),
+                                spend_nonce=store().connection.spend_actor_nonce)
 
 
 def optional_actor(
+    request: Request,
     authorization: str | None = Header(default=None),
     x_actor_id: str | None = Header(default=None),
     x_actor_signature: str | None = Header(default=None),
@@ -235,12 +179,12 @@ def optional_actor(
     if len(x_actor_id) > 120:
         raise HTTPException(status_code=400, detail="X-Actor-ID is too long")
     if production_mode():
-        return _production_actor(x_actor_id, authorization, x_actor_signature, x_actor_public_key, settings,
-                                 x_actor_timestamp, x_actor_nonce)
+        return _production_actor(request, settings)
     return x_actor_id
 
 
 def require_actor(
+    request: Request,
     authorization: str | None = Header(default=None),
     x_actor_id: str | None = Header(default=None),
     x_actor_signature: str | None = Header(default=None),
@@ -255,8 +199,7 @@ def require_actor(
     if not x_actor_id or len(x_actor_id) > 120:
         raise HTTPException(status_code=400, detail="X-Actor-ID is required")
     if production_mode():
-        _production_actor(x_actor_id, authorization, x_actor_signature, x_actor_public_key, settings,
-                          x_actor_timestamp, x_actor_nonce)
+        _production_actor(request, settings)
     return x_actor_id
 
 

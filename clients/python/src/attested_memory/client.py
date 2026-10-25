@@ -51,13 +51,22 @@ def check_integrity(unit: dict[str, Any]) -> dict[str, Any]:
     return unit
 
 
+class _NoCredentialRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        return None
+
+
 class Client:
     def __init__(self, actor: Actor, api_key: str | None = None, *,
-                 base_url: str = DEFAULT_BASE_URL, timeout: float = 20.0) -> None:
+                 base_url: str = DEFAULT_BASE_URL, timeout: float = 20.0,
+                 memory_audience: str = "memory-market",
+                 gateway_audience: str = "attested-saas-gateway") -> None:
         self.actor = actor
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self.memory_audience = memory_audience
+        self.gateway_audience = gateway_audience
 
     # --- account -------------------------------------------------------------------------
     def start_trial(self, product: str = "personal") -> dict[str, Any]:
@@ -89,19 +98,29 @@ class Client:
     # --- transport -----------------------------------------------------------------------
     def _request(self, method: str, path: str, body: dict[str, Any] | None = None, *,
                  need_key: bool = True) -> Any:
+        data = json.dumps(body, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode() if body is not None else None
+        destination = urllib.parse.urlsplit(path)
+        if destination.path.startswith("/api/v1/"):
+            audience, target_path = self.gateway_audience, destination.path[4:]
+        elif destination.path.startswith("/memory/api/"):
+            audience = self.memory_audience
+            suffix = destination.path[len("/memory/api/"):]
+            target_path = "/v1/catalog" if suffix == "search" else "/v1/" + suffix
+        else:
+            raise AttestedMemoryError(0, "no signed destination mapping for this product route")
+        if destination.query:
+            target_path += "?" + destination.query
         headers = {"Accept": "application/json", "User-Agent": f"attested-memory-python/{__version__}",
-                   **self.actor.proof_headers()}
+                   **self.actor.proof_headers(audience=audience, method=method, path=target_path, body=data or b"")}
         if need_key:
             if not self.api_key:
                 raise AttestedMemoryError(0, "no API key: call start_trial() or pass api_key")
             headers["X-SaaS-Key"] = self.api_key
-        data = None
-        if body is not None:
-            data = json.dumps(body).encode("utf-8")
+        if data is not None:
             headers["Content-Type"] = "application/json"
         request = urllib.request.Request(self.base_url + path, data=data, method=method, headers=headers)
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with urllib.request.build_opener(_NoCredentialRedirect()).open(request, timeout=self.timeout) as response:
                 raw = response.read()
         except urllib.error.HTTPError as error:
             raise AttestedMemoryError(error.code, _detail(error.read())) from None

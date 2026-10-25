@@ -1,14 +1,8 @@
 """The signed actor identity every protected Attested Memory call carries.
 
-Wire format (the same in the Memory Market, the SaaS gateway and the product shells):
-
-* ``X-Actor-ID``         ``did:actor:`` + hex SHA-256 of the raw Ed25519 public key (74 chars)
-* ``X-Actor-Public-Key`` the raw 32-byte public key, base64url
-* ``X-Actor-Timestamp``  unix seconds; the server accepts five minutes of skew
-* ``X-Actor-Nonce``      16-64 url-safe characters, good for exactly one request
-* ``X-Actor-Signature``  Ed25519 over ``<actor id>\\n<timestamp>\\n<nonce>``, base64url
-
-A captured header set therefore replays nowhere: it is bound to one nonce and expires.
+Proof v2 signs an explicit destination, HTTP method/path/query and SHA-256 of the
+exact request body. A proxy can relay signed targets without gaining authority
+to change the operation. Nonces are persisted by the destination service.
 """
 
 from __future__ import annotations
@@ -20,6 +14,7 @@ import os
 import secrets
 import time
 from pathlib import Path
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -82,15 +77,38 @@ class Actor:
     def actor_id(self) -> str:
         return "did:actor:" + hashlib.sha256(self._public).hexdigest()
 
-    def proof_headers(self, *, now: float | None = None, nonce: str | None = None) -> dict[str, str]:
-        """Fresh headers for ONE request (a new nonce each call)."""
+    @staticmethod
+    def target(audience: str, method: str, path: str, body: bytes = b"") -> dict:
+        parsed = urlsplit(path)
+        if not audience or not parsed.path.startswith("/") or parsed.scheme or parsed.netloc or parsed.fragment:
+            raise ValueError("an actor target needs a destination and an absolute service path")
+        return {"audience": audience, "method": method.upper(), "path": unquote(parsed.path),
+                "query": [list(pair) for pair in parse_qsl(parsed.query, keep_blank_values=True)],
+                "body_sha256": hashlib.sha256(body).hexdigest()}
+
+    def proof_headers(self, *, audience: str | None = None, method: str = "GET", path: str | None = None,
+                      body: bytes = b"", targets: list[dict] | None = None,
+                      now: float | None = None, nonce: str | None = None) -> dict[str, str]:
+        """Sign ONE explicit end-to-end operation; never emit legacy identity bearers.
+
+        For a Team proxy, pass both the Gateway assertion target and the final
+        Memory target. At most one operation may be authorized per destination.
+        ``body`` is exactly the bytes sent over HTTP, including JSON whitespace.
+        """
+        if targets is None:
+            if not audience or path is None:
+                raise ValueError("actor proof v2 requires audience and path")
+            targets = [self.target(audience, method, path, body)]
+        if not 1 <= len(targets) <= 4 or len({target["audience"] for target in targets}) != len(targets):
+            raise ValueError("actor intent needs one explicit target per destination")
+        intent = _b64url(json.dumps(targets, sort_keys=True, separators=(",", ":"),
+                                   ensure_ascii=False, allow_nan=False).encode())
         timestamp = str(int(time.time() if now is None else now))
         nonce = nonce or secrets.token_urlsafe(24)
-        message = f"{self.actor_id}\n{timestamp}\n{nonce}".encode()
+        message = f"attested-actor/v2\n{self.actor_id}\n{timestamp}\n{nonce}\n{intent}".encode()
         return {
-            "X-Actor-ID": self.actor_id,
-            "X-Actor-Public-Key": self.public_key,
-            "X-Actor-Timestamp": timestamp,
-            "X-Actor-Nonce": nonce,
+            "X-Actor-Version": "2", "X-Actor-Intent": intent,
+            "X-Actor-ID": self.actor_id, "X-Actor-Public-Key": self.public_key,
+            "X-Actor-Timestamp": timestamp, "X-Actor-Nonce": nonce,
             "X-Actor-Signature": _b64url(self._key.sign(message)),
         }

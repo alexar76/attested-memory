@@ -95,6 +95,13 @@ class Database:
             if statement.strip():
                 self._execute_pg(statement)
 
+    def spend_actor_nonce(self, audience: str, actor_id: str, nonce: str, expires_at: int, current: int) -> bool:
+        with self._lock, self:
+            self.execute("DELETE FROM actor_proof_nonces_v2 WHERE expires_at < ?", (current,))
+            return self.execute(
+                "INSERT INTO actor_proof_nonces_v2 (audience, actor_id, nonce, expires_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT (audience, actor_id, nonce) DO NOTHING", (audience, actor_id, nonce, expires_at)).rowcount == 1
+
     def insert_or_update_rate_limit(self, ip: str, now: int, per_minute: int = 5,
                                     per_hour: int = 30) -> bool:
         """Atomically consume one payment-order request budget for an IP.

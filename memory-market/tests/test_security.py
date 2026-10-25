@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 import contextvars
+import json
 
 import pytest
 pytest.importorskip("cryptography")
@@ -31,37 +32,49 @@ def test_catalog_entry_exposes_author_without_paid_content_or_private_metadata(t
         app_module.catalog_entry(private.id, None, None)
     assert error.value.status_code == 404
     assert app_module.catalog_entry(private.id, "owner", None).id == private.id
+    shared = market.create(MemoryCreate(title="Team only", content="team secret",
+                                         visibility="shared", tags=["team:team_one"]), "owner")
+    for actor, team in ((None, None), ("outsider", None), ("outsider", "team_two")):
+        with pytest.raises(HTTPException) as denied:
+            app_module.catalog_entry(shared.id, actor, team)
+        assert denied.value.status_code == 404
+    assert app_module.catalog_entry(shared.id, "member", "team_one").id == shared.id
 
 
 def _b64(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
 
 
-def test_production_actor_is_bound_to_ed25519_public_key():
+def test_production_actor_is_bound_to_request_destination_and_key(tmp_path, monkeypatch):
+    from fastapi import Request
+    from memory_market.store import MemoryStore
     private = Ed25519PrivateKey.generate()
-    public = private.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    public = private.public_key().public_bytes_raw()
     actor = "did:actor:" + hashlib.sha256(public).hexdigest()
-    timestamp = str(int(time.time()))
-    nonce = _b64(os.urandom(18))
-    signature = _b64(private.sign(f"{actor}\n{timestamp}\n{nonce}".encode()))
+    timestamp, nonce = str(int(time.time())), _b64(os.urandom(18))
+    intent = _b64(json.dumps([{"audience": "memory-market", "method": "GET", "path": "/v1/catalog",
+                             "query": [], "body_sha256": hashlib.sha256(b"").hexdigest()}]).encode())
+    signature = _b64(private.sign(f"attested-actor/v2\n{actor}\n{timestamp}\n{nonce}\n{intent}".encode()))
     settings = SimpleNamespace(api_key="k" * 32)
+    market = MemoryStore(str(tmp_path / "actor.sqlite3"))
+    monkeypatch.setattr(app_module, "store", lambda: market)
+    values = {"x-actor-version": "2", "x-actor-intent": intent, "x-actor-id": actor,
+              "x-actor-public-key": _b64(public), "x-actor-timestamp": timestamp,
+              "x-actor-nonce": nonce, "x-actor-signature": signature,
+              "authorization": "Bearer " + settings.api_key}
 
-    auth = "Bearer " + settings.api_key
-    assert _production_actor(actor, auth, signature, _b64(public), settings, timestamp, nonce) == actor
-    # the same proof a second time is a replay
+    def request(**changes):
+        return Request({"type": "http", "method": "GET", "path": "/v1/catalog", "query_string": b"",
+                        "headers": [(k.encode(), v.encode()) for k, v in (values | changes).items()]})
+
+    assert _production_actor(request(), settings) == actor
     with pytest.raises(HTTPException) as replay:
-        _production_actor(actor, auth, signature, _b64(public), settings, timestamp, nonce)
+        _production_actor(request(), settings)
     assert "already used" in replay.value.detail
-    # a proof without time/nonce is the old static bearer and is refused outright
-    with pytest.raises(HTTPException):
-        _production_actor(actor, auth, _b64(private.sign(actor.encode())), _b64(public), settings)
-    # a stale proof is refused even though the signature is valid
-    old_ts = str(int(time.time()) - 3600)
-    stale = _b64(private.sign(f"{actor}\n{old_ts}\n{nonce}x".encode()))
-    with pytest.raises(HTTPException):
-        _production_actor(actor, auth, stale, _b64(public), settings, old_ts, nonce + "x")
-    with pytest.raises(HTTPException):
-        _production_actor("did:actor:" + "0" * 64, auth, signature, _b64(public), settings, timestamp, nonce)
+    for changes in ({"x-actor-version": "1"}, {"x-actor-id": "did:actor:" + "0" * 64},
+                    {"x-actor-timestamp": str(int(time.time()) - 3600)}):
+        with pytest.raises(HTTPException):
+            _production_actor(request(**changes), settings)
 
 
 def test_payment_ip_budget_is_atomic_and_bounded(tmp_path):
