@@ -23,7 +23,7 @@ from .clients import TrustClients
 from .aimarket import BY_CAPABILITY, CAPABILITIES, register, signed_protocol_manifest
 from .config import Settings, get_settings, production_mode
 from .models import (
-    Catalog, Grant, GrantCreate, HubStats, MemoryCreate, MemoryUnit, PaymentConfirm,
+    Catalog, Grant, GrantCreate, HubStats, MemoryCreate, MemorySummary, MemoryUnit, PaymentConfirm,
     PaymentOrder, PaymentOrderCreate, ScoreCreate, ScoreResult, VerifyMemory,
 )
 from .payments import PaymentDesk, PaymentError, RpcUnavailable
@@ -349,6 +349,19 @@ def catalog(
 ) -> Catalog:
     items, total = store().catalog(q, actor_id, limit, offset, team_id)
     return Catalog(items=items, total=total, query=q)
+
+
+@app.get("/v1/catalog/{memory_id}", response_model=MemorySummary)
+def catalog_entry(memory_id: str, actor_id: str | None = Depends(optional_actor),
+                  team_id: str | None = Depends(team_context)) -> MemorySummary:
+    """Public sale metadata, including the author, without delivering paid content."""
+    try:
+        unit = store().get_unchecked(memory_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="memory not found") from None
+    if unit.visibility not in {"public", "paid"} and not store().can_read(unit, actor_id, team_id):
+        raise HTTPException(status_code=404, detail="memory not found")
+    return store().summary(unit)
 
 
 @app.post("/v1/memories", response_model=MemoryUnit, status_code=201)

@@ -44,3 +44,28 @@ def test_truth_and_provenance_are_properties_of_memory(tmp_path):
     updated = store.get_unchecked(unit.id)
     assert updated.truth.status == "supported"
     assert updated.provenance.status == "attested"
+
+
+def test_paid_content_search_requires_read_access(tmp_path):
+    store = make_store(tmp_path)
+    unit = store.create(MemoryCreate(title="For sale", content="hidden-unique-password",
+                                     visibility="paid", price_usdc="1"), "owner")
+    for actor in (None, "unpaid"):
+        assert store.catalog("hidden-unique", actor, 20, 0)[1] == 0
+        assert store.catalog("For sale", actor, 20, 0)[1] == 1
+    assert store.catalog("hidden-unique", "owner", 20, 0)[1] == 1
+    store.grant(unit.id, "buyer", "owner")
+    assert store.catalog("hidden-unique", "buyer", 20, 0)[1] == 1
+    public = store.create(MemoryCreate(title="Public", content="public-unique-password",
+                                       visibility="public"), "owner")
+    assert store.catalog("public-unique", None, 20, 0)[0][0].id == public.id
+
+
+def test_team_catalog_treats_underscore_as_literal(tmp_path):
+    store = make_store(tmp_path)
+    store.create(MemoryCreate(title="Other team", content="Other team secret",
+                              visibility="shared", tags=["team:teamXvictim"]), "owner")
+    assert store.catalog("", "reader", 20, 0, "team_victim")[1] == 0
+    unit = store.create(MemoryCreate(title="My team", content="team-body-secret",
+                                     visibility="shared", tags=["team:team_victim"]), "owner")
+    assert store.catalog("team-body-secret", "reader", 20, 0, "team_victim")[0][0].id == unit.id

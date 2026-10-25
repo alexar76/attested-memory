@@ -320,17 +320,32 @@ class MemoryStore:
     def catalog(self, query: str, actor_id: str | None, limit: int, offset: int, team_id: str | None = None) -> tuple[list[MemorySummary], int]:
         params: list[object] = []
         access = "(visibility IN ('public','paid'))"
+        team_tag = None
         if team_id:
-            access = "(lower(tags) LIKE ? AND visibility IN ('shared','public','paid'))"
-            params.append(f'%"team:{team_id.casefold()}"%')
+            # LIKE metacharacters in team IDs are data, never other teams.
+            escaped_team = team_id.casefold().replace("!", "!!").replace("%", "!%").replace("_", "!_")
+            team_tag = f'%"team:{escaped_team}"%'
+            access = "(lower(tags) LIKE ? ESCAPE '!' AND visibility IN ('shared','public','paid'))"
+            params.append(team_tag)
         elif actor_id:
             access = "(visibility IN ('public','paid') OR owner_id = ? OR id IN (SELECT memory_id FROM grants WHERE grantee_id = ? AND revoked_at IS NULL))"
             params.extend([actor_id, actor_id])
         search = ""
         if query:
-            search = " AND (lower(title) LIKE ? OR lower(content) LIKE ? OR lower(tags) LIKE ?)"
             needle = f"%{query.casefold()}%"
+            # A catalog may advertise paid memories, but searching their hidden
+            # content would let an unpaid caller test arbitrary secret substrings.
+            readable = "visibility = 'public'"
+            content_params: list[object] = []
+            if actor_id:
+                readable += " OR owner_id = ? OR id IN (SELECT memory_id FROM grants WHERE grantee_id = ? AND revoked_at IS NULL)"
+                content_params.extend([actor_id, actor_id])
+            if team_tag is not None:
+                readable += " OR (lower(tags) LIKE ? ESCAPE '!' AND visibility IN ('shared','paid'))"
+                content_params.append(team_tag)
+            search = f" AND (lower(title) LIKE ? OR lower(tags) LIKE ? OR (lower(content) LIKE ? AND ({readable})))"
             params.extend([needle, needle, needle])
+            params.extend(content_params)
         count = self.connection.execute(f"SELECT COUNT(*) count FROM memories WHERE {access}{search}", params).fetchone()["count"]
         rows = self.connection.execute(
             f"SELECT * FROM memories WHERE {access}{search} ORDER BY created_at DESC LIMIT ? OFFSET ?",

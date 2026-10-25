@@ -16,6 +16,23 @@ import time
 import memory_market.app as app_module
 
 
+def test_catalog_entry_exposes_author_without_paid_content_or_private_metadata(tmp_path, monkeypatch):
+    from memory_market.models import MemoryCreate
+    from memory_market.store import MemoryStore
+
+    market = MemoryStore(str(tmp_path / "summaries.sqlite3"))
+    monkeypatch.setattr(app_module, "store", lambda: market)
+    paid = market.create(MemoryCreate(title="Expert memory", content="paid-secret-content",
+                                      visibility="paid", price_usdc="2"), "owner")
+    summary = app_module.catalog_entry(paid.id, None, None).model_dump()
+    assert summary["owner_id"] == "owner" and "content" not in summary
+    private = market.create(MemoryCreate(title="Private", content="private-secret"), "owner")
+    with pytest.raises(HTTPException) as error:
+        app_module.catalog_entry(private.id, None, None)
+    assert error.value.status_code == 404
+    assert app_module.catalog_entry(private.id, "owner", None).id == private.id
+
+
 def _b64(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
 

@@ -247,7 +247,7 @@ def listings_v2(request: Request, q: str = "", limit: int = 30) -> dict[str, Any
 @app.get("/v1/listings/{memory_id}")
 def listing_v2(memory_id: str, request: Request) -> dict[str, Any]:
     try:
-        response = httpx.get(f"{HUB}/v1/memories/{memory_id}", headers=_market_headers(request), timeout=15)
+        response = httpx.get(f"{HUB}/v1/catalog/{memory_id}", headers=_market_headers(request), timeout=15)
     except httpx.HTTPError as error:
         raise HTTPException(503, "Memory Market unavailable") from error
     if response.status_code >= 400:
