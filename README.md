@@ -1,10 +1,3 @@
-<!-- aicom-mirror-notice -->
-> **🔄 Synced from a monorepo — but with a live history.** `attested-memory` mirrors the
-> canonical AI-Factory monorepo. History here is append-only (no force-push).
-> **Pull requests are welcome** — merged PRs are imported back into the monorepo
-> and re-synced here, so your contribution becomes canonical.
-> 💬 **[Issues](https://github.com/alexar76/attested-memory/issues)** · **[Pull requests](https://github.com/alexar76/attested-memory/pulls)** both welcome.
-
 <!-- aicom-readme-badges -->
 <p align="center">
   <a href="https://github.com/alexar76/attested-memory/actions/workflows/ci.yml"><img src="https://github.com/alexar76/attested-memory/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
@@ -16,6 +9,9 @@
   <a href="https://github.com/alexar76/attested-memory/blob/main/LICENSE"><img src="https://raw.githubusercontent.com/alexar76/attested-memory/refs/heads/main/docs/badges/license.svg" alt="License: Apache-2.0" /></a>
 </p>
 <!-- /aicom-readme-badges -->
+
+<!-- aicom-mirror-notice -->
+> 🔄 Synced from the [AI-Factory monorepo](https://github.com/alexar76/aicom) (append-only history). **Pull requests are welcome** — merged PRs are imported back and re-synced here. [Issues](https://github.com/alexar76/attested-memory/issues) · [Pull requests](https://github.com/alexar76/attested-memory/pulls)
 
 <p align="center">
   <a href="https://attestedmemory.net/">
