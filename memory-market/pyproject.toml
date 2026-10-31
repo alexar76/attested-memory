@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Portable, attested memory market for agents"
 requires-python = ">=3.11"
 dependencies = [
-  "cryptography>=44,<47",
+  "cryptography>=50.0.2,<51",
   "dilithium-py>=1.4,<2",
   "fastapi>=0.115,<1",
   "httpx>=0.28,<1",
