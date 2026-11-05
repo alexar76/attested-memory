@@ -448,9 +448,28 @@ def confirm_payment_order(
         raise HTTPException(status_code=503, detail=f"Base RPC unavailable: {error}") from None
 
 
-def _aimarket_actor(request: Request) -> str:
-    channel = request.headers.get("x-payment-channel", "anonymous")
-    return "aimarket:" + hashlib.sha256(channel.encode()).hexdigest()[:20]
+_BUYER_REF = re.compile(r"bref-[0-9a-f]{32}")
+_NEEDS_BUYER = (
+    "this capability needs a buyer the hub can name: call it with an X-API-Key credit "
+    "account (or a verified payment); trial and anonymous calls can read public memories only"
+)
+
+
+def _aimarket_actor(request: Request) -> str | None:
+    """The buyer the hub vouches for on this invoke, or None for an anonymous caller.
+
+    The hub sends `X-AIMarket-Buyer-Ref` (aimarket_hub/provider_buyer_ref.py) only to its
+    operator's own providers, next to the internal token this route already requires, and
+    only when it authenticated the buyer: a credit account, a verified x402 payer or a held
+    payment channel. The owner used to be a hash of `X-Payment-Channel`, which was empty for
+    every buyer on credits, x402 or a trial — all of them one shared owner, reading each
+    other's private memories — and keyed per hub process for channel buyers, so it changed
+    on every hub restart. None now means: public memories only, no writes.
+    """
+    ref = (request.headers.get("x-aimarket-buyer-ref") or "").strip()
+    if not _BUYER_REF.fullmatch(ref):
+        return None
+    return "aimarket:" + ref
 
 
 def _public_base(default_port: int) -> str:
@@ -499,6 +518,8 @@ def invoke_capability(product_id: str, capability_id: str, body: dict, request: 
     if not isinstance(payload, dict):
         raise HTTPException(status_code=422, detail="input must be an object")
     actor = _aimarket_actor(request)
+    if actor is None and capability_id not in ("memory.read@v1", "memory.search@v1"):
+        raise HTTPException(status_code=403, detail=_NEEDS_BUYER)
     try:
         if capability_id == "memory.write@v1":
             allowed = {key: payload[key] for key in ("title", "content", "tags", "visibility", "price_usdc", "source_refs", "parent_memory_ids") if key in payload}

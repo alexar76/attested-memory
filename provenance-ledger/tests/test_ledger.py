@@ -112,3 +112,19 @@ def test_health_fails_with_503_when_database_is_down(monkeypatch):
     assert response.status_code == 503
     assert payload["status"] == "degraded"
     assert payload["database"] == {"backend": "postgresql", "healthy": False}
+
+
+def test_hub_attestation_actor_is_the_named_buyer_or_plainly_anonymous():
+    """It was sha256 of X-Payment-Channel: one made-up actor for every buyer the hub sent an
+    empty header for (credits, x402, trial). Now the hub's buyer ref, else aimarket:anonymous."""
+    from fastapi import Request
+
+    from provenance_ledger.app import _aimarket_actor
+
+    def req(headers: dict) -> Request:
+        return Request({"type": "http", "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()]})
+
+    ref = "bref-" + "c" * 32
+    assert _aimarket_actor(req({"X-AIMarket-Buyer-Ref": ref})) == "aimarket:" + ref
+    for headers in ({}, {"X-Payment-Channel": ""}, {"X-AIMarket-Buyer-Ref": "bref-zz"}):
+        assert _aimarket_actor(req(headers)) == "aimarket:anonymous"

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import hmac
 import os
+import re
 from contextlib import asynccontextmanager
 from functools import lru_cache
 
@@ -154,9 +154,19 @@ def protocol_manifest() -> dict:
     return signed_protocol_manifest(ledger().signer)
 
 
+_BUYER_REF = re.compile(r"bref-[0-9a-f]{32}")
+
+
 def _aimarket_actor(request: Request) -> str:
-    channel = request.headers.get("x-payment-channel", "anonymous")
-    return "aimarket:" + hashlib.sha256(channel.encode()).hexdigest()[:20]
+    """Who an attestation made through the hub is recorded under.
+
+    The buyer the hub vouches for (`X-AIMarket-Buyer-Ref`, sent only to the operator's own
+    providers beside the internal token), else plainly `aimarket:anonymous`. It used to be a
+    hash of `X-Payment-Channel`, which named one made-up actor for every buyer on credits,
+    x402 or a trial, and a new one for channel buyers after each hub restart.
+    """
+    ref = (request.headers.get("x-aimarket-buyer-ref") or "").strip()
+    return "aimarket:" + ref if _BUYER_REF.fullmatch(ref) else "aimarket:anonymous"
 
 
 @app.post("/capabilities/{product_id}/{capability_id}/invoke", dependencies=[Depends(require_capability_token)])
