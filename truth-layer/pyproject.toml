@@ -10,7 +10,7 @@ requires-python = ">=3.11"
 dependencies = [
   "cryptography>=50.0.2,<51",
   "dilithium-py>=1.4,<2",
-  "fastapi>=0.115,<1",
+  "fastapi>=0.162.0,<1",
   "httpx>=0.28,<1",
   "pydantic>=2.10,<3",
   "uvicorn>=0.34,<1",
