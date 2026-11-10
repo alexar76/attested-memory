@@ -20,7 +20,7 @@
 
 Version 1 was a storefront with no author side: no publisher, no wallet, no take
 rate, no payout. Version 2 adds all of it and writes none of the machinery — that
-already exists in [Attested Meter](../attested/attested-meter/), which registers
+already exists in [Attested Meter](https://meter.attestedmemory.net/), which registers
 publishers, splits every captured charge and issues signed payout instructions.
 
 So this service holds **no ledger, no balance and no admin token**. It does three

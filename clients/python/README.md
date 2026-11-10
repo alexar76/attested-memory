@@ -38,7 +38,7 @@ different request. Nonces are persisted by the service, including across worker
 restarts. `Client` handles these targets automatically; direct callers must pass
 `audience`, `method`, `path` and the exact `body` bytes to `Actor.proof_headers`.
 Legacy identity-only proofs are refused. See the
-[wire contract](../../../docs/actor-request-proofs-v2.md).
+[wire contract](../../docs/actor-request-proofs-v2.md).
 
 Environment for the CLI: `ATTESTED_MEMORY_HOME`, `ATTESTED_MEMORY_URL`, `ATTESTED_MEMORY_API_KEY`.
 
