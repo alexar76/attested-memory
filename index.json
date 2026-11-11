@@ -1,0 +1,15 @@
+{
+ "format": "histor.manifest-revisions/v1",
+ "server": "io.github.alexar76/attested-memory",
+ "revisions": [
+  {
+   "revision": 1,
+   "manifestDigest": "sha256:2e01abd3be085c01bc4848bc88cba36252a7f089b2886e189205a8c993ce4c0e",
+   "serverVersion": "3.15.16",
+   "createdAt": "2026-11-11T07:22:43Z",
+   "signer": "https://github.com/alexar76/attested-memory/.github/workflows/sign-manifest-revision.yml@refs/heads/main",
+   "logIndex": "3805243249",
+   "envelope": "revisions/1.json"
+  }
+ ]
+}
