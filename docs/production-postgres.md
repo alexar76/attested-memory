@@ -5,6 +5,13 @@ store has no PostgreSQL DSN. The bundled Compose configuration gives Memory
 Market, Truth Layer and Provenance Ledger one database and one login. Each service
 has its own DSN setting and connection pool. Operators can provide separate databases.
 
+Set `MEMORY_MARKET_DATABASE_URL`, `TRUTH_LAYER_DATABASE_URL` and
+`PROVENANCE_LEDGER_DATABASE_URL` to provisioned PostgreSQL databases with different
+service roles. Give each role access to its own database and deny connections from
+the other service roles. For an existing deployment, migrate and verify each store
+before switching its DSN. Compose retains the bundled configuration when the overrides
+are unset.
+
 Build and start the updated Memory Market before installing the hourly check.
 For the first baseline, run `sudo ./scripts/install-provenance-reconcile.sh --initialize`
 on the standard Compose host. For an existing retained baseline, run the installer

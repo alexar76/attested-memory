@@ -136,7 +136,7 @@ services:
     build: ./memory-market
     environment:
       MEMORY_MARKET_DB: /data/memory-market.sqlite3
-      MEMORY_MARKET_DATABASE_URL: postgresql://${POSTGRES_USER:-aicom}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-aicom}
+      MEMORY_MARKET_DATABASE_URL: ${MEMORY_MARKET_DATABASE_URL:-postgresql://${POSTGRES_USER:-aicom}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-aicom}}
       AIFACTORY_PROD: "1"
       AIMARKET_CAPABILITY_TOKEN: ${AIMARKET_CAPABILITY_TOKEN:?run ./start.sh}
       MEMORY_MARKET_STATIC_DIR: /app/static
@@ -199,7 +199,7 @@ services:
     environment:
       TRUTH_LAYER_DB: /data/truth-layer.sqlite3
       MEMORY_MARKET_URL: http://memory-market:8810
-      TRUTH_LAYER_DATABASE_URL: postgresql://${POSTGRES_USER:-aicom}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-aicom}
+      TRUTH_LAYER_DATABASE_URL: ${TRUTH_LAYER_DATABASE_URL:-postgresql://${POSTGRES_USER:-aicom}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-aicom}}
       AIFACTORY_PROD: "1"
       AIMARKET_CAPABILITY_TOKEN: ${AIMARKET_CAPABILITY_TOKEN:?run ./start.sh}
       AIMARKET_HUB_URL: http://hub:9083
@@ -241,7 +241,7 @@ services:
     build: ./provenance-ledger
     environment:
       PROVENANCE_LEDGER_DB: /data/provenance-ledger.sqlite3
-      PROVENANCE_LEDGER_DATABASE_URL: postgresql://${POSTGRES_USER:-aicom}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-aicom}
+      PROVENANCE_LEDGER_DATABASE_URL: ${PROVENANCE_LEDGER_DATABASE_URL:-postgresql://${POSTGRES_USER:-aicom}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-aicom}}
       AIFACTORY_PROD: "1"
       AIMARKET_CAPABILITY_TOKEN: ${AIMARKET_CAPABILITY_TOKEN:?run ./start.sh}
       PROVENANCE_KEY_FILE: /data/signing-key.pem

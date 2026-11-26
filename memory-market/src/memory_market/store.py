@@ -113,7 +113,9 @@ class MemoryStore:
                     grantee_id TEXT NOT NULL,
                     actor_id TEXT NOT NULL,
                     event_type TEXT NOT NULL CHECK (event_type IN ('granted','revoked')),
-                    occurred_at TEXT NOT NULL
+                    occurred_at TEXT NOT NULL,
+                    payment_order_id TEXT,
+                    payment_tx_hash TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_memory_grant_events_memory
                 ON memory_grant_events(memory_id, occurred_at, id);
@@ -198,6 +200,10 @@ class MemoryStore:
                 self.connection.execute("BEGIN IMMEDIATE")
             if "paid_block_hash" not in self._columns("payment_orders"):
                 self.connection.execute("ALTER TABLE payment_orders ADD COLUMN paid_block_hash TEXT")
+            grant_event_columns = self._columns("memory_grant_events")
+            for column in ("payment_order_id", "payment_tx_hash"):
+                if column not in grant_event_columns:
+                    self.connection.execute(f"ALTER TABLE memory_grant_events ADD COLUMN {column} TEXT")
             columns = self._columns("memories")
             if "review_state" not in columns:
                 self.connection.execute("ALTER TABLE memories ADD COLUMN review_state TEXT NOT NULL DEFAULT 'approved' "
@@ -462,7 +468,7 @@ class MemoryStore:
         self, order_id: str, tx_hash: str, payer: str, paid_block: int,
         paid_block_hash: str | None, paid_at: str, paid_unix: int, late: bool,
     ) -> bool:
-        """Claim one transaction and issue its access grant in one SQLite transaction."""
+        """Record one settlement, its access grant and audit event atomically."""
         with self.lock:
             try:
                 with self.connection:
@@ -501,6 +507,10 @@ class MemoryStore:
                         "UPDATE payment_orders SET state='confirmed', grant_id=?, last_error=NULL WHERE order_id=?",
                         (persisted["id"], order_id),
                     )
+                    self._record_grant_event(
+                        row["memory_id"], persisted["id"], row["grantee_id"], "system:payment", "granted",
+                        granted_at, payment_order_id=order_id, payment_tx_hash=tx_hash.lower(),
+                    )
                 return True
             except Exception as error:
                 # sqlite3 and psycopg expose different exception classes; SQLSTATE
@@ -509,22 +519,43 @@ class MemoryStore:
                     return False
                 raise
 
-    def reorg_payment(self, order_id: str) -> None:
-        """Remove access granted by a payment whose block left the canonical chain."""
+    def reorg_payment(self, order_id: str, paid_block_hash: str) -> bool:
+        """Record the rollback of the specific settlement that was checked against the chain."""
         with self.lock, self.connection:
+            if not self.connection.is_postgres:
+                self.connection.execute("BEGIN IMMEDIATE")
+            lock = " FOR UPDATE" if self.connection.is_postgres else ""
             row = self.connection.execute(
-                "SELECT grant_id, memory_id, grantee_id FROM payment_orders WHERE order_id = ?",
-                (order_id,),
+                "SELECT grant_id, memory_id, grantee_id, tx_hash FROM payment_orders "
+                "WHERE order_id = ? AND state = 'confirmed' AND paid_block_hash = ?" + lock,
+                (order_id, paid_block_hash),
             ).fetchone()
-            if row is not None:
-                if row["grant_id"]:
-                    self.connection.execute("DELETE FROM grants WHERE id = ?", (row["grant_id"],))
+            if row is None:
+                return False
+            grant_id = row["grant_id"]
+            if grant_id:
+                self.connection.execute("SELECT id FROM grants WHERE id = ?" + lock, (grant_id,)).fetchone()
+            self.connection.execute(
+                "UPDATE payment_orders SET state='expired', tx_hash=NULL, payer=NULL, "
+                "paid_block=NULL, paid_block_hash=NULL, paid_at=NULL, paid_unix=NULL, late=0, grant_id=NULL, "
+                "last_error='payment block reorged' WHERE order_id = ?",
+                (order_id,),
+            )
+            if grant_id:
+                revoked_at = now()
                 self.connection.execute(
-                    "UPDATE payment_orders SET state='expired', tx_hash=NULL, payer=NULL, "
-                    "paid_block=NULL, paid_block_hash=NULL, paid_at=NULL, paid_unix=NULL, late=0, grant_id=NULL, "
-                    "last_error='payment block reorged' WHERE order_id = ?",
-                    (order_id,),
+                    """UPDATE grants SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL
+                       AND NOT EXISTS (SELECT 1 FROM payment_orders WHERE grant_id = ? AND state = 'confirmed')
+                       AND COALESCE((SELECT event_type FROM memory_grant_events
+                           WHERE grant_id = ? AND payment_order_id IS NULL
+                           ORDER BY occurred_at DESC, id DESC LIMIT 1), 'revoked') = 'revoked'""",
+                    (revoked_at, grant_id, grant_id, grant_id),
                 )
+                self._record_grant_event(
+                    row["memory_id"], grant_id, row["grantee_id"], "system:payment", "revoked", revoked_at,
+                    payment_order_id=order_id, payment_tx_hash=row["tx_hash"],
+                )
+            return True
 
     def can_read(self, unit: MemoryUnit, actor_id: str | None, team_id: str | None = None) -> bool:
         if not self.connection.execute(f"SELECT 1 FROM memories WHERE id = ? AND {_ADMITTED}",
@@ -635,12 +666,23 @@ class MemoryStore:
                 return Grant(**(dict(row) | {"revoked_at": revoked_at}))
             return Grant(**dict(row))
 
-    def _record_grant_event(self, memory_id: str, grant_id: str, grantee_id: str,
-                            actor_id: str, event_type: str, occurred_at: str) -> None:
+    def grant_history(self, memory_id: str, limit: int = 30, offset: int = 0) -> list[dict]:
+        rows = self.connection.execute(
+            "SELECT id, memory_id, grant_id, grantee_id, actor_id, event_type, occurred_at, "
+            "payment_order_id, payment_tx_hash FROM memory_grant_events WHERE memory_id = ? "
+            "ORDER BY occurred_at DESC, id DESC LIMIT ? OFFSET ?",
+            (memory_id, limit, offset),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def _record_grant_event(self, memory_id: str, grant_id: str, grantee_id: str, actor_id: str,
+                            event_type: str, occurred_at: str, *, payment_order_id: str | None = None,
+                            payment_tx_hash: str | None = None) -> None:
         self.connection.execute(
-            "INSERT INTO memory_grant_events (id, memory_id, grant_id, grantee_id, actor_id, event_type, occurred_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (uuid4().hex, memory_id, grant_id, grantee_id, actor_id, event_type, occurred_at),
+            "INSERT INTO memory_grant_events (id, memory_id, grant_id, grantee_id, actor_id, event_type, "
+            "occurred_at, payment_order_id, payment_tx_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (uuid4().hex, memory_id, grant_id, grantee_id, actor_id, event_type, occurred_at,
+             payment_order_id, payment_tx_hash),
         )
 
     def score(self, memory_id: str, actor_id: str, score: int) -> ScoreResult:

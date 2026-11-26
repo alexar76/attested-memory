@@ -109,17 +109,36 @@ def test_check_finds_a_rewritten_receipt(approved_memory, pair):
     assert problem.startswith("the ledger does not verify the receipt: ") and "event_hash" in problem
 
 
-def test_check_validates_each_receipt_beyond_the_recorded_market_receipt(approved_memory, pair):
+def test_check_validates_each_receipt_beyond_the_recorded_market_receipt(approved_memory, pair, monkeypatch):
+    from fastapi.testclient import TestClient
+    import provenance_ledger.app as ledger_app
+
     store, ledger, clients = pair
     unit = approved_memory(store, MemoryCreate(title="kept", content="one"), "agent:owner")
     reconcile(store, clients)
     anchor = store.get_unchecked(unit.id).provenance.receipt_id
     later = clients.attest(unit, "verified", "truth-layer")
     assert check(store, clients)["matching"] == 1
+    monkeypatch.setattr(ledger_app, "ledger", lambda: ledger)
+    token = "synthetic-internal-capability-token"
+    monkeypatch.setenv("AIMARKET_CAPABILITY_TOKEN", token)
+    client = TestClient(ledger_app.app)
+
+    def verify_in_hub(**options):
+        response = client.post(
+            "/capabilities/receipt-verify/receipt.verify@v1/invoke",
+            json={"input": {"receipt_id": anchor, **options}},
+            headers={"X-AIMarket-Internal-Token": token},
+        )
+        assert response.status_code == 200
+        return response.json()["result"]
+
+    assert verify_in_hub(full_chain=True)["checks"]["full_lineage"] is True
 
     with ledger.connection:
         ledger.connection.execute("UPDATE receipts SET actor_id = ? WHERE id = ?", ("wrong-actor", later["id"]))
-    assert ledger.verify(anchor).valid
+    assert verify_in_hub()["valid"] is True
+    assert verify_in_hub(full_chain=True)["checks"]["full_lineage"] is False
     assert check(store, clients)["mismatched"][0]["problem"] == "the ledger does not verify the receipt: full_lineage"
 
 

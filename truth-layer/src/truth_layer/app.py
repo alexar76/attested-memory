@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-import os
+import hashlib
 import hmac
+import os
 import re
 from contextlib import asynccontextmanager
 from functools import lru_cache
@@ -118,17 +119,21 @@ def evidence_pack(pack_id: str) -> EvidencePack:
 
 
 _MARKET_MEMORY_ID = re.compile(r"mem_[0-9a-f]{24}")
+_BUYER_REF = re.compile(r"bref-[0-9a-f]{32}")
 
 
-def require_hub_pack_access(pack: EvidencePack, request: Request) -> None:
-    if not pack.memory_id or not _MARKET_MEMORY_ID.fullmatch(pack.memory_id):
-        return
+def hub_buyer_hash(request: Request) -> str | None:
+    ref = request.headers.get("x-aimarket-buyer-ref", "").strip()
+    return hashlib.sha256(ref.encode()).hexdigest() if _BUYER_REF.fullmatch(ref) else None
+
+
+def require_market_pack_access(memory_id: str, request: Request) -> None:
     market = os.getenv("MEMORY_MARKET_URL", "").rstrip("/")
     if not market:
         raise HTTPException(status_code=503, detail="memory access check unavailable")
     try:
         decision = httpx.get(
-            f"{market}/internal/evidence-access/{pack.memory_id}",
+            f"{market}/internal/evidence-access/{memory_id}",
             headers={
                 "X-AIMarket-Internal-Token": os.getenv("AIMARKET_CAPABILITY_TOKEN", ""),
                 "X-AIMarket-Buyer-Ref": request.headers.get("x-aimarket-buyer-ref", ""),
@@ -142,6 +147,15 @@ def require_hub_pack_access(pack: EvidencePack, request: Request) -> None:
         raise HTTPException(status_code=404, detail="evidence pack not found")
     if decision.status_code != 204:
         raise HTTPException(status_code=503, detail="memory access check unavailable")
+
+
+def require_hub_pack_access(pack: EvidencePack, request: Request, buyer_ref_hash: str | None) -> None:
+    if pack.memory_id and _MARKET_MEMORY_ID.fullmatch(pack.memory_id):
+        require_market_pack_access(pack.memory_id, request)
+        return
+    caller_hash = hub_buyer_hash(request)
+    if not buyer_ref_hash or not caller_hash or not hmac.compare_digest(buyer_ref_hash, caller_hash):
+        raise HTTPException(status_code=404, detail="evidence pack not found")
 
 
 def _public_base(default_port: int) -> str:
@@ -193,15 +207,20 @@ def invoke_capability(
         raise HTTPException(status_code=422, detail="input must be an object")
     try:
         if capability_id in {"memory.verify@v1", "claim.check@v1"}:
-            pack = verify(VerifyRequest.model_validate(payload))
-            store().save(pack)
+            parsed = VerifyRequest.model_validate(payload)
+            if parsed.memory_id is not None and capability_id == "claim.check@v1":
+                raise HTTPException(status_code=422, detail="use memory.verify@v1 to verify a memory ID")
+            if parsed.memory_id and _MARKET_MEMORY_ID.fullmatch(parsed.memory_id):
+                require_market_pack_access(parsed.memory_id, request)
+            pack = verify(parsed)
+            store().save(pack, buyer_ref_hash=hub_buyer_hash(request))
             result = pack.result.model_dump(mode="json")
         elif capability_id == "contradiction.scan@v1":
             parsed = ContradictionScanRequest.model_validate(payload)
             result = scan_contradictions(parsed.statements).model_dump(mode="json")
         else:
-            pack = store().get(str(payload.get("pack_id") or ""))
-            require_hub_pack_access(pack, request)
+            pack, buyer_ref_hash = store().get_with_buyer(str(payload.get("pack_id") or ""))
+            require_hub_pack_access(pack, request, buyer_ref_hash)
             result = pack.model_dump(mode="json")
     except KeyError:
         raise HTTPException(status_code=404, detail="evidence pack not found") from None

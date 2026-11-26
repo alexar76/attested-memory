@@ -333,7 +333,10 @@ class PaymentDesk:
                 canonical = self.rpc.call("eth_getBlockByNumber", [hex(int(row["paid_block"])), False])
                 live_hash = str((canonical or {}).get("hash") or "").lower()
                 if live_hash and live_hash != stored_hash.lower():
-                    self.store.reorg_payment(order_id)
+                    if not self.store.reorg_payment(order_id, stored_hash):
+                        refreshed = self.get(order_id)
+                        if refreshed.settled:
+                            return refreshed
                 else:
                     return current
             else:
@@ -362,8 +365,7 @@ class PaymentDesk:
                 block = self.rpc.call("eth_getBlockByNumber", [hex(int(row["paid_block"])), False])
                 live_hash = str((block or {}).get("hash") or "").lower()
                 if live_hash and live_hash != str(row["paid_block_hash"]).lower():
-                    self.store.reorg_payment(row["order_id"])
-                    revoked += 1
+                    revoked += int(self.store.reorg_payment(row["order_id"], row["paid_block_hash"]))
             except (RpcUnavailable, PaymentError, ValueError, KeyError):
                 # A transient RPC failure must not revoke a valid grant. The next poll
                 # retries; only a positive hash mismatch is evidence of a reorg.

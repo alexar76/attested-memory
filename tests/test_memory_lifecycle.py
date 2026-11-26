@@ -1,6 +1,7 @@
 """Exercise the review gate and the two time axes through normal memory serving paths."""
 
 from concurrent.futures import ThreadPoolExecutor
+import json
 import os
 import subprocess
 import sys
@@ -173,8 +174,12 @@ def test_rejection_serializes_with_concurrent_submission(approved_memory, market
 
 def test_legacy_rows_are_backfilled_and_remain_readable(market):
     legacy = market.create(MemoryCreate(title="Legacy record", content="Old evidence", visibility="public"), "agent:owner")
+    market.review(legacy.id, "approved", REVIEWER)
+    previous_grant = market.grant(legacy.id, "agent:reader", "agent:owner")
     with market.connection:
         market.connection.execute("DELETE FROM memory_validity WHERE memory_id = ?", (legacy.id,))
+        for column in ("payment_order_id", "payment_tx_hash"):
+            market.connection.execute(f"ALTER TABLE memory_grant_events DROP COLUMN {column}")
         market.connection.execute("DROP INDEX idx_memories_review_queue")
         market.connection.execute("DROP INDEX idx_memories_without_value")
         for column in ("review_state", "reviewed_at", "value_digest"):
@@ -183,6 +188,9 @@ def test_legacy_rows_are_backfilled_and_remain_readable(market):
     try:
         assert reopened.get_available(legacy.id).review_state == "approved"
         assert reopened.get_available(legacy.id).validity is None
+        previous_event, = reopened.grant_history(legacy.id)
+        assert previous_event["grant_id"] == previous_grant.id
+        assert previous_event["payment_order_id"] is None and previous_event["payment_tx_hash"] is None
         reopened.review(legacy.id, "rejected", REVIEWER)
         with pytest.raises(RejectedValue):
             reopened.create(MemoryCreate(title="Replayed legacy value", content=" Old evidence "), "agent:owner")
@@ -202,3 +210,22 @@ def test_review_cli_requires_terminal_and_records_the_operator_decision(market, 
     monkeypatch.setattr("builtins.input", lambda _: f"approve {unit.id}")
     assert review_cli.main(["approve", unit.id]) == 0
     assert market.get_available(unit.id).review_state == "approved"
+
+
+def test_payment_audit_is_available_to_the_operator_after_a_reorg(approved_memory, market, monkeypatch, capsys):
+    unit = approved_memory(market, MemoryCreate(title="Paid", content="Reviewed", visibility="paid", price_usdc="1"), "agent:owner")
+    order_id = "pay_" + "a" * 32
+    market.insert_payment_order((
+        order_id, unit.id, "agent:buyer", "1", "1.000001", "1000001", "recipient",
+        "2026-11-26T00:00:00Z", 0, 3600, 1, 0,
+    ))
+    assert market.settle_payment(order_id, "tx", "payer", 1, "hash", "2026-11-26T00:00:00Z", 1, False)
+    assert not market.reorg_payment(order_id, "wrong-hash")
+    assert market.reorg_payment(order_id, "hash")
+    monkeypatch.setattr(review_cli.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(review_cli.sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(review_cli, "get_settings", lambda: SimpleNamespace(db_path=market.connection.db_path))
+    assert review_cli.main(["grant-history", unit.id, "--limit", "1"]) == 0
+    events = json.loads(capsys.readouterr().out)
+    assert len(events) == 1 and events[0]["event_type"] == "revoked"
+    assert events[0]["payment_order_id"] == order_id and events[0]["payment_tx_hash"] == "tx"

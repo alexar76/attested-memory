@@ -1,4 +1,4 @@
-"""Review proposals from an operator terminal, outside the agent API."""
+"""Review proposals and inspect access history from an operator terminal."""
 
 from __future__ import annotations
 
@@ -19,6 +19,10 @@ def main(argv: list[str] | None = None) -> int:
     queue = commands.add_parser("list", help="list pending proposals")
     queue.add_argument("--limit", type=int, choices=range(1, 101), default=30, metavar="1..100")
     queue.add_argument("--offset", type=int, default=0)
+    history = commands.add_parser("grant-history", help="list access events for a memory")
+    history.add_argument("memory_id")
+    history.add_argument("--limit", type=int, choices=range(1, 101), default=30, metavar="1..100")
+    history.add_argument("--offset", type=int, default=0)
     for name in ("show", "approve", "reject", "validity"):
         command = commands.add_parser(name)
         command.add_argument("memory_id")
@@ -31,10 +35,12 @@ def main(argv: list[str] | None = None) -> int:
 
     store = MemoryStore(get_settings().db_path)
     try:
-        if args.command == "list":
+        if args.command in {"list", "grant-history"}:
             if args.offset < 0:
                 parser.error("--offset cannot be negative")
-            print(json.dumps(store.pending_reviews(args.limit, args.offset), indent=2))
+            rows = (store.pending_reviews(args.limit, args.offset) if args.command == "list"
+                    else store.grant_history(args.memory_id, args.limit, args.offset))
+            print(json.dumps(rows, indent=2))
             return 0
 
         unit = store.get_unchecked(args.memory_id)

@@ -201,7 +201,11 @@ def invoke_capability(
         elif capability_id == "lineage.get@v1":
             result = ledger().lineage(str(payload.get("memory_id") or "")).model_dump(mode="json")
         else:
-            result = ledger().verify(str(payload.get("receipt_id") or "")).model_dump(mode="json")
+            verification = VerifyRequest.model_validate({
+                "receipt_id": str(payload.get("receipt_id") or ""),
+                "full_chain": payload.get("full_chain", False),
+            })
+            result = ledger().verify(verification.receipt_id, full_chain=verification.full_chain).model_dump(mode="json")
     except KeyError:
         raise HTTPException(status_code=404, detail="receipt not found") from None
     except ChainHeadMissing:

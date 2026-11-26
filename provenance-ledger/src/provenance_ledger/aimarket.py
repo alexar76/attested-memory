@@ -44,7 +44,10 @@ CAPABILITIES = (
         "receipt-verify", "receipt.verify@v1", "Verify Receipt",
         "Verify event hash, chain link, Ed25519 signature and required ML-DSA-65 signature.",
         0.005, "provenance/verification",
-        {"type": "object", "required": ["receipt_id"], "properties": {"receipt_id": {"type": "string"}}},
+        {"type": "object", "required": ["receipt_id"], "properties": {
+            "receipt_id": {"type": "string"},
+            "full_chain": {"type": "boolean", "default": False, "description": "Verify from genesis through the stored head."},
+        }},
     ),
 )
 BY_CAPABILITY = {item.capability_id: item for item in CAPABILITIES}

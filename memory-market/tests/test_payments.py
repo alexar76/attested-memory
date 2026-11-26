@@ -159,14 +159,45 @@ def test_confirmed_payment_is_revoked_after_block_reorg(desk):
     order = payments.create(memory.id, "agent:reorg")
     chain.pay(int(order.amount_raw))
     chain.head = 104
-    assert payments.confirm(order.order_id, TX).settled is True
+    settled = payments.confirm(order.order_id, TX)
+    assert settled.settled is True
     assert store.has_grant(memory.id, "agent:reorg") is True
+    assert payments.confirm(order.order_id, TX).grant_id == settled.grant_id
 
+    original_hash = chain.block_hashes[100]
     chain.block_hashes[100] = "0x" + "f" * 64
     payments.poll_once()
 
     assert payments.get(order.order_id).settled is False
     assert store.has_grant(memory.id, "agent:reorg") is False
+    assert store.reorg_payment(order.order_id, original_hash) is False
+    audit = store.grant_history(memory.id)
+    assert [event["event_type"] for event in audit] == ["revoked", "granted"]
+    assert all(event["payment_order_id"] == order.order_id and event["payment_tx_hash"] == TX
+               and event["grant_id"] == settled.grant_id for event in audit)
+
+
+@pytest.mark.parametrize("remaining_access", ["another_order", "owner_grant"])
+def test_reorg_preserves_independent_access(desk, remaining_access):
+    store, memory, chain, payments = desk
+    buyer = "agent:reorg"
+    if remaining_access == "owner_grant":
+        store.grant(memory.id, buyer, memory.owner_id)
+    lost = payments.create(memory.id, buyer)
+    other = payments.create(memory.id, buyer) if remaining_access == "another_order" else None
+    chain.pay(int(lost.amount_raw))
+    chain.head = 105
+    assert payments.confirm(lost.order_id, TX).settled
+    if other:
+        extra_tx = "0x" + "b" * 64
+        chain.pay(int(other.amount_raw), block=101, tx_hash=extra_tx)
+        assert payments.confirm(other.order_id, extra_tx).settled
+
+    assert store.reorg_payment(lost.order_id, chain.block_hashes[100])
+    assert store.has_grant(memory.id, buyer)
+    if other:
+        assert store.reorg_payment(other.order_id, chain.block_hashes[101])
+        assert not store.has_grant(memory.id, buyer)
 
 
 def test_checkout_enforces_operator_admission(desk):

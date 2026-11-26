@@ -51,13 +51,60 @@ def test_hub_evidence_pack_respects_current_memory_readers(approved_memory, tmp_
         return truth_client.post(route, json={"input": {"pack_id": pack.id}},
                                  headers={"X-AIMarket-Internal-Token": token, "X-AIMarket-Buyer-Ref": ref})
 
+    def submit(claim, ref="", memory_id=None, *, verify_memory=False):
+        capability = "memory-verify/memory.verify@v1" if verify_memory else "claim-check/claim.check@v1"
+        return truth_client.post(
+            f"/capabilities/{capability}/invoke",
+            json={"input": {"claim": claim, "memory_id": memory_id}},
+            headers={"X-AIMarket-Internal-Token": token, "X-AIMarket-Buyer-Ref": ref},
+        )
+
     assert retrieve(private_pack, buyer).json()["result"]["claim"] == unit.content
     assert retrieve(private_pack, reader).status_code == retrieve(private_pack).status_code == 404
+    assert submit("Scoped claim", reader, unit.id, verify_memory=True).status_code == 404
+    assert submit("Standalone claim with a memory ID", buyer, public.id).status_code == 422
     market.grant(unit.id, "aimarket:" + reader, owner)
     assert retrieve(private_pack, reader).status_code == 200
+    created = submit("Scoped claim", reader, unit.id, verify_memory=True)
+    assert created.status_code == 200
+    scoped_pack = truth.get(created.json()["result"]["evidence_pack_id"])
+    assert retrieve(scoped_pack, reader).status_code == 200
     market.revoke(unit.id, "aimarket:" + reader, owner)
     assert retrieve(private_pack, reader).status_code == 404
+    assert retrieve(scoped_pack, reader).status_code == 404
+    assert retrieve(scoped_pack, buyer).status_code == 200
     assert retrieve(public_pack).json()["result"]["claim"] == public.content
-    assert retrieve(standalone).status_code == 200
+    assert retrieve(standalone).status_code == retrieve(standalone, buyer).status_code == 404
+
+    for memory_id in (None, "external-document-123"):
+        claim = "Owned standalone claim"
+        created = submit(claim, buyer, memory_id, verify_memory=memory_id is not None)
+        assert created.status_code == 200
+        owned_pack = truth.get(created.json()["result"]["evidence_pack_id"])
+        assert retrieve(owned_pack, buyer).json()["result"]["claim"] == claim
+        assert retrieve(owned_pack, reader).status_code == retrieve(owned_pack).status_code == 404
+
+    anonymous = submit("Anonymous standalone claim")
+    assert anonymous.status_code == 200
+    anonymous_pack = truth.get(anonymous.json()["result"]["evidence_pack_id"])
+    assert retrieve(anonymous_pack).status_code == retrieve(anonymous_pack, buyer).status_code == 404
     monkeypatch.delenv("MEMORY_MARKET_URL")
     assert retrieve(private_pack, buyer).status_code == 503
+
+
+def test_migration_preserves_existing_packs_without_inventing_a_buyer(tmp_path, monkeypatch):
+    monkeypatch.delenv("TRUTH_LAYER_DATABASE_URL", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    path = str(tmp_path / "truth.sqlite3")
+    previous = TruthStore(path)
+    sample = verify(VerifyRequest(claim="A standalone claim from the previous schema"))
+    previous.save(sample)
+    with previous.connection:
+        previous.connection.execute("ALTER TABLE evidence_packs DROP COLUMN buyer_ref_hash")
+    previous.connection.close()
+
+    migrated = TruthStore(path)
+    try:
+        assert migrated.get_with_buyer(sample.id) == (sample, None)
+    finally:
+        migrated.connection.close()

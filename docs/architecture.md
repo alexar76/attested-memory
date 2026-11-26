@@ -41,6 +41,18 @@ docker compose exec memory-market python -m memory_market.review approve "$memor
 
 `reject` records a durable rejection for the producer and the normalized content. The key uses Unicode NFC and collapsed whitespace, with case preserved. The same producer cannot resubmit the value under another title or visibility. Existing copies from that producer are withheld. Other producers keep independent records. Truth Layer evidence scores stay separate from operator decisions. Previously issued purchase orders and payment history remain in billing.
 
+Operators can inspect a memory's access history from the same terminal:
+
+```sh
+docker compose exec memory-market python -m memory_market.review grant-history "$memory_id"
+```
+
+The history records owner grants and revocations, payment settlements, and payment rollbacks.
+Payment events retain the order ID, transaction hash and grant ID when a rollback clears them
+from the order. A rollback leaves access available when a separate confirmed payment or a
+recorded owner grant still supports it. History covers events written by versions that record
+them.
+
 Optional `valid_from` and `valid_until` on a write describe when the fact held. Bounds use timezone-aware RFC 3339. The start is inclusive and the end is exclusive. Omitted bounds are open. The operator can record a correction while retaining the previously recorded interval.
 
 ```sh
