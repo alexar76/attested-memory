@@ -18,16 +18,17 @@ from fastapi.staticfiles import StaticFiles
 import httpx
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from pydantic import AwareDatetime
 
 from .clients import TrustClients, commitment
 from .aimarket import BY_CAPABILITY, CAPABILITIES, register, signed_protocol_manifest
 from .config import Settings, get_settings, production_mode
 from .models import (
-    Catalog, Grant, GrantCreate, HubStats, MemoryCreate, MemorySummary, MemoryUnit, PaymentConfirm,
+    Catalog, Grant, GrantCreate, HubStats, MemoryCreate, MemorySummary, MemoryTimes, MemoryUnit, PaymentConfirm,
     PaymentOrder, PaymentOrderCreate, ScoreCreate, ScoreResult, VerifyMemory,
 )
 from .payments import PaymentDesk, PaymentError, RpcUnavailable
-from .store import MemoryStore
+from .store import MemoryStore, RejectedValue
 from .signing import ProviderSigner
 
 hub_published = 0
@@ -318,17 +319,20 @@ def catalog(
     offset: int = Query(default=0, ge=0), actor_id: str | None = Depends(optional_actor), team_id: str | None = Depends(team_context),
     truth: str = Query(default="", max_length=80, description="Truth Layer statuses to include, comma-separated, "
                        "or any; default: all but rejected"),
+    valid_at: AwareDatetime | None = None, known_at: AwareDatetime | None = None,
 ) -> Catalog:
-    items, total = store().catalog(q, actor_id, limit, offset, team_id, _truth_filter(truth))
+    items, total = store().catalog(q, actor_id, limit, offset, team_id, _truth_filter(truth),
+                                   valid_at=valid_at, known_at=known_at)
     return Catalog(items=items, total=total, query=q)
 
 
 @app.get("/v1/catalog/{memory_id}", response_model=MemorySummary)
 def catalog_entry(memory_id: str, actor_id: str | None = Depends(optional_actor),
-                  team_id: str | None = Depends(team_context)) -> MemorySummary:
+                  team_id: str | None = Depends(team_context), valid_at: AwareDatetime | None = None,
+                  known_at: AwareDatetime | None = None) -> MemorySummary:
     """Public sale metadata, including the author, without delivering paid content."""
     try:
-        unit = store().get_unchecked(memory_id)
+        unit = store().get_available(memory_id, valid_at=valid_at, known_at=known_at)
     except KeyError:
         raise HTTPException(status_code=404, detail="memory not found") from None
     if unit.visibility not in {"public", "paid"} and not store().can_read(unit, actor_id, team_id):
@@ -337,20 +341,19 @@ def catalog_entry(memory_id: str, actor_id: str | None = Depends(optional_actor)
 
 
 @app.post("/v1/memories", response_model=MemoryUnit, status_code=201)
-def create_memory(
-    request: MemoryCreate, actor_id: str = Depends(require_actor), settings: Settings = Depends(get_settings)
-) -> MemoryUnit:
-    unit = store().create(request, actor_id)
-    receipt = TrustClients(settings).attest(unit, "created", actor_id)
-    if receipt:
-        store().set_provenance(unit.id, receipt["id"], receipt["chain_root"], created=True)
-    return store().get_unchecked(unit.id)
+def create_memory(request: MemoryCreate, actor_id: str = Depends(require_actor)) -> MemoryUnit:
+    try:
+        return store().create(request, actor_id)
+    except RejectedValue as error:
+        raise HTTPException(status_code=409, detail=str(error)) from None
 
 
 @app.get("/v1/memories/{memory_id}", response_model=MemoryUnit)
-def read_memory(memory_id: str, actor_id: str | None = Depends(optional_actor), team_id: str | None = Depends(team_context)) -> MemoryUnit:
+def read_memory(memory_id: str, actor_id: str | None = Depends(optional_actor),
+                team_id: str | None = Depends(team_context), valid_at: AwareDatetime | None = None,
+                known_at: AwareDatetime | None = None) -> MemoryUnit:
     try:
-        unit = store().get_unchecked(memory_id)
+        unit = store().get_available(memory_id, valid_at=valid_at, known_at=known_at)
     except KeyError:
         raise HTTPException(status_code=404, detail="memory not found") from None
     if not store().can_read(unit, actor_id, team_id):
@@ -377,7 +380,7 @@ def read_memory_evidence(
     team_id: str | None = Depends(team_context), settings: Settings = Depends(get_settings),
 ) -> dict:
     try:
-        unit = store().get_unchecked(memory_id)
+        unit = store().get_available(memory_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="evidence pack not found") from None
     if not store().can_read(unit, actor_id, team_id) or not unit.truth.evidence_pack_id:
@@ -424,7 +427,7 @@ def verify_memory(
     settings: Settings = Depends(get_settings),
 ) -> MemoryUnit:
     try:
-        unit = store().get_unchecked(memory_id)
+        unit = store().get_available(memory_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="memory not found") from None
     if unit.owner_id != actor_id:
@@ -434,8 +437,7 @@ def verify_memory(
         raise HTTPException(status_code=503, detail="truth layer unavailable; memory remains unverified")
     store().set_truth(unit.id, result["status"], result["confidence"], result["evidence_pack_id"])
     updated = store().get_unchecked(unit.id)
-    # The pack holds the claim, which for a unit that is not public can repeat its content; the
-    # receipt (readable by anyone through lineage.get@v1) then carries a hash of the pack id.
+    # A pack can contain the claim itself. Public lineage includes pack ids only for public units.
     pack = result["evidence_pack_id"]
     receipt = TrustClients(settings).attest(
         updated, "verified", "truth-layer",
@@ -538,7 +540,7 @@ def _aimarket_actor(request: Request) -> str | None:
          dependencies=[Depends(require_capability_access)])
 def evidence_access(memory_id: str, request: Request) -> Response:
     try:
-        unit = store().get_unchecked(memory_id)
+        unit = store().get_available(memory_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="memory not found") from None
     if not store().can_read(unit, _aimarket_actor(request)):
@@ -596,25 +598,21 @@ def invoke_capability(product_id: str, capability_id: str, body: dict, request: 
         raise HTTPException(status_code=403, detail=_NEEDS_BUYER)
     try:
         if capability_id == "memory.write@v1":
-            allowed = {key: payload[key] for key in ("title", "content", "tags", "visibility", "price_usdc", "source_refs", "parent_memory_ids") if key in payload}
-            unit = store().create(MemoryCreate.model_validate(allowed), actor)
-            # The REST write asks the ledger for a receipt; this one did not, so units written
-            # through the hub had no provenance at all. A ledger that is down leaves the unit
-            # unattested for python -m memory_market.reconcile_provenance to finish.
-            receipt = TrustClients(get_settings()).attest(unit, "created", actor)
-            if receipt:
-                store().set_provenance(unit.id, receipt["id"], receipt["chain_root"], created=True)
-                unit = store().get_unchecked(unit.id)
+            unit = create_memory(MemoryCreate.model_validate(payload), actor)
             result = unit.model_dump(mode="json")
         elif capability_id == "memory.read@v1":
-            unit = store().get_unchecked(str(payload.get("memory_id") or ""))
+            times = MemoryTimes.model_validate(payload)
+            unit = store().get_available(str(payload.get("memory_id") or ""),
+                                         valid_at=times.valid_at, known_at=times.known_at)
             if not store().can_read(unit, actor):
                 raise HTTPException(status_code=403, detail="memory requires an access grant")
             result = unit.model_dump(mode="json")
         elif capability_id == "memory.search@v1":
             limit = max(1, min(int(payload.get("limit", 20)), 100))
+            times = MemoryTimes.model_validate(payload)
             items, total = store().catalog(str(payload.get("query") or ""), actor, limit, 0,
-                                           truth=_truth_filter(payload.get("truth")))
+                                           truth=_truth_filter(payload.get("truth")),
+                                           valid_at=times.valid_at, known_at=times.known_at)
             result = {"items": [item.model_dump(mode="json") for item in items], "total": total}
         elif capability_id == "memory.share@v1":
             memory_id, grantee_id = str(payload.get("memory_id") or ""), str(payload.get("grantee_id") or "")

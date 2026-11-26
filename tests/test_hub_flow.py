@@ -9,11 +9,11 @@ from truth_layer.engine import verify
 from truth_layer.models import Evidence, VerifyRequest
 
 
-def test_memory_truth_and_provenance_share_one_object(tmp_path):
+def test_memory_truth_and_provenance_share_one_object(approved_memory, tmp_path):
     market = MemoryStore(str(tmp_path / "market.sqlite3"))
     provenance = Ledger(str(tmp_path / "provenance.sqlite3"), Signer(str(tmp_path / "signing.pem")))
 
-    memory = market.create(MemoryCreate(
+    memory = approved_memory(market, MemoryCreate(
         title="Deployment continuity",
         content="The signed snapshot can restore the agent after a restart.",
         visibility="shared",

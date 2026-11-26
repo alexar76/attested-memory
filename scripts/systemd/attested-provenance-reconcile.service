@@ -1,8 +1,7 @@
 # Memory Market <-> Provenance Ledger, once an hour (timer beside this file):
 #  1. attest units whose write-time receipt never landed (a ledger outage leaves them unattested);
-#  2. --check: every attested unit's recorded receipt must still be in its ledger chain with the
-#     chain root the ledger returned, and the full lineage must verify. A mismatch fails this unit (exit 2) and is
-#     printed to the journal: journalctl -u attested-provenance-reconcile
+#  2. Verify every attested lineage against the host-retained heads and advance the checkpoint
+#     only on success. A mismatch fails the unit and is printed to the journal.
 # Install with scripts/install-provenance-reconcile.sh on the Compose host.
 [Unit]
 Description=Attested Memory: reconcile and cross-check provenance receipts
@@ -12,6 +11,9 @@ Requires=docker.service
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/aicom/attested/attested-memory-hub
+StateDirectory=attested-provenance-reconcile
+StateDirectoryMode=0700
+UMask=0077
 # A failed attest (ledger down) must not skip the check, hence the leading '-'.
 ExecStart=-/usr/bin/docker compose exec -T memory-market python -m memory_market.reconcile_provenance
-ExecStart=/usr/bin/docker compose exec -T memory-market python -m memory_market.reconcile_provenance --check
+ExecStart=/usr/bin/python3 /usr/local/libexec/attested-provenance-checkpoint.py ${STATE_DIRECTORY}

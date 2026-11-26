@@ -25,10 +25,27 @@ class Capability:
 
 
 OBJECT_OUTPUT = {"type": "object", "additionalProperties": True}
+TEMPORAL_QUERY = {
+    "valid_at": {"type": "string", "format": "date-time", "description": "When the fact was valid."},
+    "known_at": {"type": "string", "format": "date-time", "description": "When the system knew it."},
+}
 CAPABILITIES = (
-    Capability("memory-write", "memory.write@v1", "Write Memory", "Create a portable Memory Unit and request provenance attestation.", 0.012, "memory/storage", {"type": "object", "required": ["title", "content"], "properties": {"title": {"type": "string"}, "content": {"type": "string"}, "tags": {"type": "array"}, "visibility": {"type": "string"}}}, OBJECT_OUTPUT),
-    Capability("memory-read", "memory.read@v1", "Read Memory", "Read public or caller-authorized memory with trust and lineage state.", 0.006, "memory/retrieval", {"type": "object", "required": ["memory_id"], "properties": {"memory_id": {"type": "string"}}}, OBJECT_OUTPUT),
-    Capability("memory-search", "memory.search@v1", "Search Memory", "Search discoverable Memory Units by title, content and tags; memories the Truth Layer rejected are left out unless truth asks for them.", 0.004, "memory/retrieval", {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}, "truth": {"type": "string", "description": "Truth Layer statuses to include, comma-separated (unverified, supported, contested, rejected), or any. Default: all but rejected."}}}, OBJECT_OUTPUT),
+    Capability("memory-write", "memory.write@v1", "Submit Memory", "Submit a Memory Unit for operator review. Approved units become eligible for provenance attestation.", 0.012, "memory/storage", {
+        "type": "object", "required": ["title", "content"], "properties": {
+            "title": {"type": "string"}, "content": {"type": "string"}, "tags": {"type": "array"},
+            "visibility": {"type": "string"}, "valid_from": {"type": "string", "format": "date-time"},
+            "valid_until": {"type": "string", "format": "date-time"},
+        },
+    }, OBJECT_OUTPUT),
+    Capability("memory-read", "memory.read@v1", "Read Memory", "Read admitted memory if the caller has access, with trust and lineage state.", 0.006, "memory/retrieval", {
+        "type": "object", "required": ["memory_id"], "properties": {"memory_id": {"type": "string"}, **TEMPORAL_QUERY},
+    }, OBJECT_OUTPUT),
+    Capability("memory-search", "memory.search@v1", "Search Memory", "Search admitted memory by title, content and tags; memories the Truth Layer rejected are left out unless truth asks for them.", 0.004, "memory/retrieval", {
+        "type": "object", "properties": {
+            "query": {"type": "string"}, "limit": {"type": "integer"}, **TEMPORAL_QUERY,
+            "truth": {"type": "string", "description": "Truth Layer statuses to include, comma-separated (unverified, supported, contested, rejected), or any. Default: all but rejected."},
+        },
+    }, OBJECT_OUTPUT),
     Capability("memory-share", "memory.share@v1", "Share Memory", "Grant another agent access when the invoking actor owns the Memory Unit; with revoke: true, withdraw access the owner gave (paid access stays).", 0.008, "memory/access", {"type": "object", "required": ["memory_id", "grantee_id"], "properties": {"memory_id": {"type": "string"}, "grantee_id": {"type": "string"}, "revoke": {"type": "boolean", "default": False}}}, OBJECT_OUTPUT),
     Capability("memory-score", "memory.score@v1", "Score Memory", "Record one bounded quality score per invoking actor.", 0.003, "memory/reputation", {"type": "object", "required": ["memory_id", "score"], "properties": {"memory_id": {"type": "string"}, "score": {"type": "integer", "minimum": 1, "maximum": 5}}}, OBJECT_OUTPUT),
 )

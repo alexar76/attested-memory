@@ -139,7 +139,12 @@ class Database:
 
     def __enter__(self):
         if not self.is_postgres:
-            self._sqlite.__enter__()
+            self._lock.acquire()
+            try:
+                self._sqlite.__enter__()
+            except BaseException:
+                self._lock.release()
+                raise
             return self
         assert self._pool is not None
         manager = self._pool.connection()
@@ -149,7 +154,10 @@ class Database:
 
     def __exit__(self, exc_type, exc, tb):
         if not self.is_postgres:
-            return self._sqlite.__exit__(exc_type, exc, tb)
+            try:
+                return self._sqlite.__exit__(exc_type, exc, tb)
+            finally:
+                self._lock.release()
         manager, conn = self._tx.get()
         try:
             if exc_type is None:

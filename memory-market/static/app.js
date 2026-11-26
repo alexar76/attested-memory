@@ -319,13 +319,15 @@ createForm.addEventListener("submit", async (event) => {
     source_refs: document.querySelector("#sources").value.split("\n").map((source) => source.trim()).filter(Boolean),
   };
   message.className = "form-message";
-  message.textContent = "Writing and requesting attestation…";
+  message.textContent = "Submitting memory for review…";
   try {
     const encoded = JSON.stringify(body);
     const response = await fetch("/v1/memories", { method: "POST", redirect: "error", headers: await headers("/v1/memories", {method: "POST", body: encoded}, true), body: encoded });
     const result = await response.json();
     if (!response.ok) throw new Error(result.detail || "Could not create memory");
-    message.textContent = `Created ${result.id} · ${result.provenance.status}`;
+    message.textContent = result.review_state === "pending"
+      ? `Submitted ${result.id} · awaiting review`
+      : `Created ${result.id} · ${result.provenance.status}`;
     createForm.reset();
     actorInput.value = owner;
     price.disabled = true;

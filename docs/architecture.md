@@ -23,11 +23,32 @@ AIMarket Hub :9084 --------+---------------- Independent Alien Monitor
 
 Cross-service calls use HTTP. Memory writes can still succeed during a trust service outage and keep the record `unverified` or `unattested`. Hub reads of a pack tied to a Memory Market memory require a current access decision from the market.
 
-Both REST writes and `memory.write@v1` ask the ledger for a `created` receipt. `python -m memory_market.reconcile_provenance` retries unattested units. It first looks for a creation receipt in the owner's name so a lost response can be reconciled. `--count` reports pending units.
+REST writes and `memory.write@v1` submit units for operator review. Approved units become eligible for a `created` receipt. `python -m memory_market.reconcile_provenance` looks for a creation receipt in the owner's name and requests one if needed. `--count` reports approved units awaiting attestation.
 
 `--check` requires the receipt and root kept by Memory Market to appear in the ledger chain and verifies the available chain from genesis through its current head. The bundled services share one PostgreSQL database and one role. A writer to that database can alter the ledger and the market's reference together. An independently retained head export lets the operator check an older observation against the current chain.
 
-Search and catalog omit memories the Truth Layer `rejected` unless the caller asks for that status or `truth=any`. A rejected memory stays readable by id to an authorized reader, with its status.
+Search and catalog omit memories the Truth Layer labels `rejected` unless the caller asks for that status or `truth=any`. The operator's review decision is an independent admission control. Operator-rejected values stay withheld on all retrieval paths, including historical requests and `truth=any`.
+
+## Review and temporal retrieval
+
+The operator reviews proposals from a privileged interactive terminal on the Compose host. Keep Docker administrative access with human operators. The agent-facing API and Hub capabilities expose submission and retrieval. Pending proposals stay out of the catalogue, direct reads, evidence retrieval, payment checkout and provenance publication. The migration preserves existing memories as approved.
+
+```sh
+docker compose exec memory-market python -m memory_market.review list
+docker compose exec memory-market python -m memory_market.review show "$memory_id"
+docker compose exec memory-market python -m memory_market.review approve "$memory_id"
+```
+
+`reject` records a durable rejection for the producer and the normalized content. The key uses Unicode NFC and collapsed whitespace, with case preserved. The same producer cannot resubmit the value under another title or visibility. Existing copies from that producer are withheld. Other producers keep independent records. Truth Layer evidence scores stay separate from operator decisions. Previously issued purchase orders and payment history remain in billing.
+
+Optional `valid_from` and `valid_until` on a write describe when the fact held. Bounds use timezone-aware RFC 3339. The start is inclusive and the end is exclusive. Omitted bounds are open. The operator can record a correction while retaining the previously recorded interval.
+
+```sh
+docker compose exec memory-market python -m memory_market.review validity "$memory_id" \
+  --from 2026-01-01T00:00:00Z --until 2026-03-01T00:00:00Z
+```
+
+Read and search accept `valid_at` (when the fact applied) and `known_at` (which version of the validity interval the system had recorded by then). Each defaults to the current time. Historical reads still enforce current visibility, access grants and operator rejections. A proposal appears in a historical read only if it had already been approved at `known_at`.
 
 ## One object, three concerns
 

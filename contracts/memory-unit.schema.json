@@ -12,6 +12,17 @@
     "title": { "type": "string", "minLength": 1, "maxLength": 200 },
     "tags": { "type": "array", "items": { "type": "string", "maxLength": 48 }, "maxItems": 20 },
     "visibility": { "enum": ["private", "shared", "public", "paid"] },
+    "review_state": { "enum": ["pending", "approved", "rejected"] },
+    "validity": {
+      "type": ["object", "null"],
+      "required": ["valid_from", "valid_until", "recorded_at"],
+      "properties": {
+        "valid_from": { "type": ["string", "null"], "format": "date-time" },
+        "valid_until": { "type": ["string", "null"], "format": "date-time" },
+        "recorded_at": { "type": "string", "format": "date-time" }
+      },
+      "additionalProperties": false
+    },
     "price_usdc": { "type": ["string", "null"], "pattern": "^[0-9]+(\\.[0-9]{1,6})?$" },
     "truth": {
       "type": "object",

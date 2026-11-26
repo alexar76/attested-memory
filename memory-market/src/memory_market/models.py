@@ -1,16 +1,42 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import AwareDatetime, BaseModel, Field, field_validator, model_validator
 
 
 Visibility = Literal["private", "shared", "public", "paid"]
 TruthStatus = Literal["unverified", "supported", "contested", "rejected"]
+ReviewStatus = Literal["pending", "approved", "rejected"]
 
 
-class MemoryCreate(BaseModel):
+def utc_timestamp(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat(timespec="microseconds")
+
+
+class ValidityWindow(BaseModel):
+    valid_from: AwareDatetime | None = None
+    valid_until: AwareDatetime | None = None
+
+    @model_validator(mode="after")
+    def ordered_window(self) -> "ValidityWindow":
+        if self.valid_from is not None and self.valid_until is not None and self.valid_from >= self.valid_until:
+            raise ValueError("valid_until must be later than valid_from")
+        return self
+
+
+class ValidityVersion(ValidityWindow):
+    recorded_at: AwareDatetime
+
+
+class MemoryTimes(BaseModel):
+    valid_at: AwareDatetime | None = None
+    known_at: AwareDatetime | None = None
+
+
+class MemoryCreate(ValidityWindow):
     title: str = Field(min_length=1, max_length=200)
     content: str = Field(min_length=1, max_length=200_000)
     tags: list[str] = Field(default_factory=list, max_length=20)
@@ -81,6 +107,8 @@ class MemorySummary(BaseModel):
     score_count: int
     created_at: str
     updated_at: str
+    review_state: ReviewStatus = "approved"
+    validity: ValidityVersion | None = None
 
 
 class MemoryUnit(MemorySummary):

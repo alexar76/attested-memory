@@ -2,9 +2,7 @@
 
 * truth.status filtered no read: a memory the Truth Layer rejected came back from search like any
   other. Catalog and memory.search@v1 now leave rejected memories out unless ``truth`` asks for them.
-* memory.write@v1 through the hub requested no receipt, and a failed receipt was never retried.
-  The hub write now asks the ledger like the REST write does, and reconcile_provenance finishes the
-  unattested ones without doubling a receipt that did land.
+* Reconciliation attests approved hub and REST memories and retries failures without doubling a receipt.
 """
 from types import SimpleNamespace
 
@@ -29,8 +27,8 @@ def market(tmp_path, monkeypatch):
     return store
 
 
-def _public(store, title, status):
-    unit = store.create(MemoryCreate(title=title, content=title + " body", visibility="public"), "agent:owner")
+def _public(approved_memory, store, title, status):
+    unit = approved_memory(store, MemoryCreate(title=title, content=title + " body", visibility="public"), "agent:owner")
     if status != "unverified":
         store.set_truth(unit.id, status, 0.9, "pack_" + status)
     return unit
@@ -43,8 +41,8 @@ def _invoke(capability_id, payload, headers=None):
         product_id, capability_id, {"input": payload}, Request({"type": "http", "headers": raw}), Response())["result"]
 
 
-def test_search_leaves_out_rejected_memories_unless_asked(market):
-    units = {s: _public(market, f"note {s}", s) for s in ("unverified", "supported", "contested", "rejected")}
+def test_search_leaves_out_rejected_memories_unless_asked(approved_memory, market):
+    units = {s: _public(approved_memory, market, f"note {s}", s) for s in ("unverified", "supported", "contested", "rejected")}
 
     _, default_total = market.catalog("note", None, 20, 0)
     assert default_total == 3
@@ -63,9 +61,9 @@ def test_search_leaves_out_rejected_memories_unless_asked(market):
     assert read["truth"]["status"] == "rejected"
 
 
-def test_rest_catalog_takes_truth_and_refuses_an_unknown_status(market):
-    _public(market, "note a", "supported")
-    _public(market, "note b", "rejected")
+def test_rest_catalog_takes_truth_and_refuses_an_unknown_status(approved_memory, market):
+    _public(approved_memory, market, "note a", "supported")
+    _public(approved_memory, market, "note b", "rejected")
     client = TestClient(app_module.app)
     assert client.get("/v1/catalog", params={"q": "note"}).json()["total"] == 1
     assert client.get("/v1/catalog", params={"q": "note", "truth": "any"}).json()["total"] == 2
@@ -73,28 +71,32 @@ def test_rest_catalog_takes_truth_and_refuses_an_unknown_status(market):
     assert client.get("/v1/catalog", params={"q": "note", "truth": "true"}).status_code == 422
 
 
-def test_hub_write_requests_a_receipt(market, monkeypatch):
+def test_hub_write_is_attested_only_after_approval(market):
     calls = []
 
     class Clients:
-        def __init__(self, settings):
-            pass
+        def created_receipt(self, unit):
+            return None
 
         def attest(self, unit, event_type, actor_id, metadata=None):
             calls.append((unit.id, event_type, actor_id))
             return {"id": "rcpt_hub", "chain_root": "a" * 64}
 
-    monkeypatch.setattr(app_module, "TrustClients", Clients)
     result = _invoke("memory.write@v1", {"title": "hub note", "content": "written via the hub"},
                      {"X-AIMarket-Buyer-Ref": ALICE})
+    assert result["review_state"] == "pending"
+    assert reconcile(market, Clients())["unattested"] == 0
+    assert calls == []
+    market.review(result["id"], "approved", "operator:fixture")
+    assert reconcile(market, Clients())["attested"] == 1
     assert calls == [(result["id"], "created", "aimarket:" + ALICE)]
-    assert result["provenance"] == {"status": "attested", "receipt_id": "rcpt_hub", "lineage_root": "a" * 64}
+    assert market.get_unchecked(result["id"]).provenance.receipt_id == "rcpt_hub"
 
 
-def test_reconcile_links_a_landed_receipt_and_attests_the_rest_once(market):
-    landed = market.create(MemoryCreate(title="landed", content="x"), "agent:one")
-    missing = market.create(MemoryCreate(title="missing", content="y"), "agent:two")
-    down = market.create(MemoryCreate(title="down", content="z"), "agent:three")
+def test_reconcile_links_a_landed_receipt_and_attests_the_rest_once(approved_memory, market):
+    landed = approved_memory(market, MemoryCreate(title="landed", content="x"), "agent:one")
+    missing = approved_memory(market, MemoryCreate(title="missing", content="y"), "agent:two")
+    down = approved_memory(market, MemoryCreate(title="down", content="z"), "agent:three")
 
     class Ledger:
         attested: list = []

@@ -5,18 +5,24 @@ store has no PostgreSQL DSN. The bundled Compose configuration gives Memory
 Market, Truth Layer and Provenance Ledger one database and one login. Each service
 has its own DSN setting and connection pool. Operators can provide separate databases.
 
-Install the hourly reconcile and full-lineage check on the standard Compose host
-with `sudo ./scripts/install-provenance-reconcile.sh`. It installs both systemd
-units and enables the timer. Inspect runs with
+Build and start the updated Memory Market before installing the hourly check.
+For the first baseline, run `sudo ./scripts/install-provenance-reconcile.sh --initialize`
+on the standard Compose host. For an existing retained baseline, run the installer
+without the flag. The baseline is `/var/lib/attested-provenance-reconcile/heads.json`
+in a root-only directory on the host, outside the database and container volumes.
+
+Each timer run attempts reconciliation, then checks every available lineage against
+the previous baseline and atomically advances it on success. The host passes the
+old JSON over stdin and retains the new export only if every recorded head was
+found and every lineage verified. A mismatch or unavailable service leaves the
+previous file in place. Inspect runs with
 `journalctl -u attested-provenance-reconcile.service`.
 
-Use `python -m memory_market.reconcile_provenance --export-heads` from the Memory
-Market environment to record verified heads. Keep the JSON private in storage
-whose credentials are separate from the database and service account. Compare
-with that trusted file using `--check --against /path/to/retained-heads.json`.
-The comparison requires every retained receipt and root to remain in its
-memory's available lineage. The timer runs the database-backed comparison by
-default. Independent retention and the choice of checkpoint are operator tasks.
+To carry a checkpoint across hosts, restore a previously trusted copy into that
+directory with root-only permissions before installing. A missing file fails the
+normal hourly run. Choose the initial baseline deliberately. Host retention
+separates it from database and service credentials. Keep a further copy under
+separate administration if host-level recovery is required.
 
 SQLite remains available only when `AIFACTORY_PROD` is unset, for development and
 tests. Existing files can be copied with `scripts/migrate_sqlite_to_postgres.py`.

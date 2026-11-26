@@ -69,13 +69,13 @@ def _invoke(capability_id, payload, headers=None):
         product_id, capability_id, {"input": payload}, Request({"type": "http", "headers": raw}), Response())["result"]
 
 
-def _paid(store, owner="agent:owner", refs=("https://example.org/private-source",)):
-    return store.create(MemoryCreate(title="paid note", content="the paid part", visibility="paid",
+def _paid(approved_memory, store, owner="agent:owner", refs=("https://example.org/private-source",)):
+    return approved_memory(store, MemoryCreate(title="paid note", content="the paid part", visibility="paid",
                                      price_usdc="1.00", source_refs=list(refs)), owner)
 
 
-def test_only_a_created_receipt_marks_a_unit_attested(market, recorder):
-    unit = _paid(market)
+def test_only_a_created_receipt_marks_a_unit_attested(approved_memory, market, recorder):
+    unit = _paid(approved_memory, market)
     order = SimpleNamespace(order_id="ord_1", tx_hash="0xABC", grantee_id="agent:buyer", memory_id=unit.id)
     app_module._attest_payment(order)
     stored = market.get_unchecked(unit.id).provenance
@@ -88,8 +88,8 @@ def test_only_a_created_receipt_marks_a_unit_attested(market, recorder):
     assert market.get_unchecked(unit.id).provenance.status == "attested"
 
 
-def test_the_payment_receipt_names_neither_buyer_nor_transaction(market, recorder):
-    unit = _paid(market)
+def test_the_payment_receipt_names_neither_buyer_nor_transaction(approved_memory, market, recorder):
+    unit = _paid(approved_memory, market)
     order = SimpleNamespace(order_id="ord_1", tx_hash="0xABC", grantee_id="agent:buyer", memory_id=unit.id)
     app_module._attest_payment(order)
     sent = recorder.sent[0]
@@ -101,7 +101,7 @@ def test_the_payment_receipt_names_neither_buyer_nor_transaction(market, recorde
     assert sent["metadata"]["settlement"] == sha("ord_1|0xabc|agent:buyer")
 
 
-def test_receipts_only_include_public_sources_and_parents(market, monkeypatch):
+def test_receipts_only_include_public_sources_and_parents(approved_memory, market, monkeypatch):
     posted = []
 
     def fake_post(url, json, headers, timeout):
@@ -113,7 +113,7 @@ def test_receipts_only_include_public_sources_and_parents(market, monkeypatch):
     ref = "https://example.org/private-source"
     for visibility in ("public", "paid", "private", "shared"):
         parent = "mem_" + "d" * 24
-        unit = market.create(MemoryCreate(title=visibility, content="body", visibility=visibility,
+        unit = approved_memory(market, MemoryCreate(title=visibility, content="body", visibility=visibility,
                                           price_usdc="1.00" if visibility == "paid" else None,
                                           source_refs=[ref], parent_memory_ids=[parent]), "agent:owner")
         clients.attest(unit, "created", "agent:owner")
@@ -121,9 +121,9 @@ def test_receipts_only_include_public_sources_and_parents(market, monkeypatch):
         assert posted[-1]["parent_memory_ids"] == ([parent] if visibility == "public" else [])
 
 
-def test_the_evidence_pack_id_reaches_only_readers(market, recorder):
-    paid = _paid(market)
-    public = market.create(MemoryCreate(title="public note", content="open", visibility="public"), "agent:owner")
+def test_the_evidence_pack_id_reaches_only_readers(approved_memory, market, recorder):
+    paid = _paid(approved_memory, market)
+    public = approved_memory(market, MemoryCreate(title="public note", content="open", visibility="public"), "agent:owner")
     for unit in (paid, public):
         app_module.verify_memory(unit.id, VerifyMemory(claim="the paid part is true"), actor_id="agent:owner",
                                  settings=SimpleNamespace())
@@ -147,8 +147,8 @@ def test_the_evidence_pack_id_reaches_only_readers(market, recorder):
     assert verified[paid.id] == {"status": "supported", "confidence": 0.9}
 
 
-def test_an_owner_revokes_access_they_gave_but_not_access_that_was_paid_for(market):
-    unit = market.create(MemoryCreate(title="private", content="body", visibility="private"), "aimarket:" + ALICE)
+def test_an_owner_revokes_access_they_gave_but_not_access_that_was_paid_for(approved_memory, market):
+    unit = approved_memory(market, MemoryCreate(title="private", content="body", visibility="private"), "aimarket:" + ALICE)
     _invoke("memory.share@v1", {"memory_id": unit.id, "grantee_id": "aimarket:" + BOB}, {"X-AIMarket-Buyer-Ref": ALICE})
     assert market.can_read(unit, "aimarket:" + BOB)
 
@@ -175,7 +175,7 @@ def test_an_owner_revokes_access_they_gave_but_not_access_that_was_paid_for(mark
     assert all(event["grant_id"] == revoked["id"] and event["actor_id"] == "aimarket:" + ALICE for event in events)
 
     # REST, and a grant that a confirmed payment issued.
-    paid = _paid(market)
+    paid = _paid(approved_memory, market)
     grant = market.grant(paid.id, "agent:buyer", "agent:owner")
     with market.connection:
         market.connection.execute(

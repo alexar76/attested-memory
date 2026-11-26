@@ -17,22 +17,22 @@ import time
 import memory_market.app as app_module
 
 
-def test_catalog_entry_exposes_author_without_paid_content_or_private_metadata(tmp_path, monkeypatch):
+def test_catalog_entry_exposes_author_without_paid_content_or_private_metadata(approved_memory, tmp_path, monkeypatch):
     from memory_market.models import MemoryCreate
     from memory_market.store import MemoryStore
 
     market = MemoryStore(str(tmp_path / "summaries.sqlite3"))
     monkeypatch.setattr(app_module, "store", lambda: market)
-    paid = market.create(MemoryCreate(title="Expert memory", content="paid-secret-content",
+    paid = approved_memory(market, MemoryCreate(title="Expert memory", content="paid-secret-content",
                                       visibility="paid", price_usdc="2"), "owner")
     summary = app_module.catalog_entry(paid.id, None, None).model_dump()
     assert summary["owner_id"] == "owner" and "content" not in summary
-    private = market.create(MemoryCreate(title="Private", content="private-secret"), "owner")
+    private = approved_memory(market, MemoryCreate(title="Private", content="private-secret"), "owner")
     with pytest.raises(HTTPException) as error:
         app_module.catalog_entry(private.id, None, None)
     assert error.value.status_code == 404
     assert app_module.catalog_entry(private.id, "owner", None).id == private.id
-    shared = market.create(MemoryCreate(title="Team only", content="team secret",
+    shared = approved_memory(market, MemoryCreate(title="Team only", content="team secret",
                                          visibility="shared", tags=["team:team_one"]), "owner")
     for actor, team in ((None, None), ("outsider", None), ("outsider", "team_two")):
         with pytest.raises(HTTPException) as denied:

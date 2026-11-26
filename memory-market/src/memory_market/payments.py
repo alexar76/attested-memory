@@ -236,7 +236,7 @@ class PaymentDesk:
         if not self.enabled:
             raise RuntimeError("crypto checkout is closed: PAYMENT_RECIPIENT is not configured")
         try:
-            memory = self.store.get_unchecked(memory_id)
+            memory = self.store.get_available(memory_id)
         except KeyError as error:
             raise PaymentError("memory not found") from error
         if memory.visibility != "paid" or not memory.price_usdc:
@@ -260,11 +260,14 @@ class PaymentDesk:
             if amount_raw is None:
                 raise RuntimeError("no free exact-amount payment slots; retry later")
             order_id = "pay_" + secrets.token_hex(16)
-            self.store.insert_payment_order((
-                order_id, memory.id, grantee_id, memory.price_usdc, format_usdc(amount_raw),
-                str(amount_raw), self.recipient, iso(), now,
-                now + self.settings.payment_order_ttl_minutes * 60, head, max(0, head - 1),
-            ))
+            try:
+                self.store.insert_payment_order((
+                    order_id, memory.id, grantee_id, memory.price_usdc, format_usdc(amount_raw),
+                    str(amount_raw), self.recipient, iso(), now,
+                    now + self.settings.payment_order_ttl_minutes * 60, head, max(0, head - 1),
+                ))
+            except KeyError as error:
+                raise PaymentError("memory is no longer available for purchase") from error
         return self.get(order_id)
 
     def _transfer_in(self, receipt: dict, amount_raw: int) -> tuple[str, int, str | None] | None:

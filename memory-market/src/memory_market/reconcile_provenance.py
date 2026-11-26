@@ -5,6 +5,7 @@
     python -m memory_market.reconcile_provenance --check  # compare attested units with the ledger
     python -m memory_market.reconcile_provenance --export-heads
     python -m memory_market.reconcile_provenance --check --against previously-exported-heads.json
+    python -m memory_market.reconcile_provenance --export-heads --against - < previously-exported-heads.json
 
 A write asks the Provenance Ledger for a ``created`` receipt once, and a ledger that is down or slow
 leaves the unit ``unattested``. This finishes those: for each unit it first looks for a ``created``
@@ -12,7 +13,8 @@ receipt of the same content in the owner's name already in the ledger (an attest
 its answer was lost; a receipt someone else appended with the same hash is not taken),
 and only asks for a new one when there is none, so running it again never doubles a receipt. A unit
 the ledger still cannot take stays unattested and is counted. scripts/systemd/ has an hourly timer
-that runs it and then --check; it pages by id and is safe beside the service.
+that runs it and then compares and advances a host-retained checkpoint. Both operations page by id
+and are safe beside the service.
 
 ``--check`` is the comparison from outside the ledger. The ledger's own ``chain_head`` check holds
 its database against itself, so whoever can write that database can delete receipts and move the
@@ -125,7 +127,7 @@ def _mismatch(unit, lineage: dict, verdict: dict | None) -> str | None:
 
 
 def read_heads(path: Path) -> dict:
-    data = json.loads(path.read_text(encoding="utf-8"))
+    data = json.load(sys.stdin) if path == Path("-") else json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict) or data.get("format") != HEADS_FORMAT or not isinstance(data.get("heads"), dict):
         raise ValueError("expected an Attested Memory heads export")
     heads = data["heads"]
@@ -148,10 +150,11 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--check", action="store_true",
                       help="compare each attested unit's recorded receipt and root with the ledger")
     mode.add_argument("--export-heads", action="store_true", help="export verified chain heads for independent retention")
-    parser.add_argument("--against", type=Path, help="also require each head in this retained export")
+    parser.add_argument("--against", type=Path,
+                        help="also require each head in this retained export (use - for stdin)")
     args = parser.parse_args(argv)
-    if args.against and not args.check:
-        parser.error("--against requires --check")
+    if args.against and not (args.check or args.export_heads):
+        parser.error("--against requires --check or --export-heads")
     if args.check or args.export_heads:
         try:
             previous = read_heads(args.against) if args.against else None

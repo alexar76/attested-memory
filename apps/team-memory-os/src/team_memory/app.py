@@ -22,6 +22,12 @@ class TeamMemory(BaseModel):
     content: str = Field(min_length=1, max_length=200_000)
     tags: list[str] = Field(default_factory=list, max_length=20)
     source_refs: list[str] = Field(default_factory=list, max_length=50)
+    valid_from: str | None = None
+    valid_until: str | None = None
+
+
+def _time_query(valid_at: str | None, known_at: str | None) -> dict[str, str]:
+    return {key: value for key, value in {"valid_at": valid_at, "known_at": known_at}.items() if value is not None}
 
 
 class TeamCreate(BaseModel):
@@ -82,18 +88,25 @@ def health() -> dict[str, str]:
 @app.post("/api/team-memories", status_code=201)
 def write(body: TeamMemory, request: Request) -> Any:
     tags = [f"team:{body.team_id}", *body.tags]
-    result = _call("POST", "/v1/memories", request, team_id=body.team_id, content=json.dumps({"title": body.title, "content": body.content, "tags": tags, "visibility": "shared", "source_refs": body.source_refs}, ensure_ascii=False, separators=(",", ":")).encode())
+    payload = {"title": body.title, "content": body.content, "tags": tags, "visibility": "shared",
+               "source_refs": body.source_refs, **body.model_dump(include={"valid_from", "valid_until"}, exclude_none=True)}
+    result = _call("POST", "/v1/memories", request, team_id=body.team_id,
+                   content=json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode())
     return result
 
 
 @app.get("/api/team-search")
-def search(request: Request, team_id: str, q: str = "", limit: int = 30) -> Any:
-    return _call("GET", "/v1/catalog?" + urlencode({"q": q, "limit": max(1, min(limit, 100))}), request, team_id=team_id)
+def search(request: Request, team_id: str, q: str = "", limit: int = 30,
+           valid_at: str | None = None, known_at: str | None = None) -> Any:
+    query = {"q": q, "limit": max(1, min(limit, 100)), **_time_query(valid_at, known_at)}
+    return _call("GET", "/v1/catalog?" + urlencode(query), request, team_id=team_id)
 
 
 @app.get("/api/team-memories/{memory_id}")
-def read(memory_id: str, request: Request, team_id: str) -> Any:
-    return _call("GET", f"/v1/memories/{memory_id}", request, team_id=team_id)
+def read(memory_id: str, request: Request, team_id: str, valid_at: str | None = None,
+         known_at: str | None = None) -> Any:
+    query = urlencode(_time_query(valid_at, known_at))
+    return _call("GET", f"/v1/memories/{memory_id}" + (f"?{query}" if query else ""), request, team_id=team_id)
 
 
 @app.get("/api/team-memories/{memory_id}/evidence-pack")

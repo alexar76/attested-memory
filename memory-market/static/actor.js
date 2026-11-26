@@ -92,9 +92,9 @@
     if (url.pathname.startsWith("/memory/api/")) {
       upstream = url.pathname.slice("/memory/api/".length);
       if (upstream === "search") {
-        url.searchParams.set("q", url.searchParams.get("q") || "");
-        url.searchParams.set("limit", url.searchParams.get("limit") || "30");
-        upstream = "catalog";
+        var personalQuery = new URLSearchParams({q: url.searchParams.get("q") || "", limit: url.searchParams.get("limit") || "30"});
+        appendTimes(personalQuery, url.searchParams);
+        return [await target("memory-market", method, "/v1/catalog?" + personalQuery, body)];
       }
       return [await target("memory-market", method, "/v1/" + upstream + url.search, body)];
     }
@@ -105,19 +105,34 @@
       team = url.searchParams.get("team_id");
       if (method === "POST" && url.pathname === "/teams/api/team-memories") {
         var parsed = JSON.parse(body); team = parsed.team_id;
-        memoryBody = JSON.stringify({ title: parsed.title, content: parsed.content,
-          tags: ["team:" + team].concat(parsed.tags || []), visibility: "shared", source_refs: parsed.source_refs || [] });
+        var teamPayload = { title: parsed.title, content: parsed.content,
+          tags: ["team:" + team].concat(parsed.tags || []), visibility: "shared", source_refs: parsed.source_refs || [] };
+        ["valid_from", "valid_until"].forEach(function (key) {
+          if (parsed[key] != null) teamPayload[key] = parsed[key];
+        });
+        memoryBody = JSON.stringify(teamPayload);
         upstream = "/v1/memories";
       } else if (url.pathname === "/teams/api/team-search") {
-        upstream = "/v1/catalog?" + new URLSearchParams({q: url.searchParams.get("q") || "", limit: url.searchParams.get("limit") || "30"}).toString();
+        var teamQuery = new URLSearchParams({q: url.searchParams.get("q") || "", limit: url.searchParams.get("limit") || "30"});
+        appendTimes(teamQuery, url.searchParams);
+        upstream = "/v1/catalog?" + teamQuery;
       } else {
         upstream = "/v1/memories/" + url.pathname.slice("/teams/api/team-memories/".length);
+        var readQuery = new URLSearchParams();
+        if (!upstream.endsWith("/evidence-pack")) appendTimes(readQuery, url.searchParams);
+        if (readQuery.toString()) upstream += "?" + readQuery;
       }
       if (!team) throw Error("Team intent requires team_id");
       return [await target("attested-saas-gateway", "GET", "/v1/teams/" + encodeURIComponent(team) + "/assertion", ""),
               await target("memory-market", method, upstream, memoryBody || "")];
     }
     throw Error("No actor intent mapping for this product route");
+  }
+
+  function appendTimes(destination, source) {
+    ["valid_at", "known_at"].forEach(function (key) {
+      if (source.has(key)) destination.set(key, source.get(key));
+    });
   }
 
   async function actorId() {

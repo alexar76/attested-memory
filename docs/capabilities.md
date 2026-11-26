@@ -2,9 +2,9 @@
 
 | Capability | Owner | MVP behavior |
 | --- | --- | --- |
-| `memory.write@v1` | memory-market | Persists a canonical Memory Unit and requests hash-only attestation |
-| `memory.read@v1` | memory-market | Enforces visibility and explicit grants before returning content |
-| `memory.search@v1` | memory-market | Metadata and text search over records visible to the caller; leaves out memories the Truth Layer rejected unless `truth` lists the statuses wanted (or `any`) |
+| `memory.write@v1` | memory-market | Submits a Memory Unit for operator review. Optional `valid_from` and `valid_until` record fact validity |
+| `memory.read@v1` | memory-market | Enforces admission, visibility and grants. Accepts `valid_at` and `known_at` |
+| `memory.search@v1` | memory-market | Searches admitted, visible records using `valid_at` and `known_at`. Truth Layer rejections are hidden by default. `truth=any` still enforces operator decisions |
 | `memory.share@v1` | memory-market | Creates a read grant; with `revoke: true` the owner withdraws it (REST: `DELETE /v1/memories/{id}/grants/{grantee}`). Access a buyer paid for cannot be revoked by the owner |
 | `memory.score@v1` | memory-market | One caller score per memory, aggregated without rewriting history |
 | `memory.verify@v1` | truth-layer | Scores supplied evidence and records the result |

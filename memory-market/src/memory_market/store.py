@@ -4,22 +4,54 @@ import hashlib
 import json
 import sqlite3
 import threading
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from .models import Grant, HubStats, MemoryCreate, MemorySummary, MemoryUnit, ProvenanceState, ScoreResult, TruthState
+from .models import (
+    Grant, HubStats, MemoryCreate, MemorySummary, MemoryUnit, ProvenanceState, ScoreResult,
+    TruthState, ValidityVersion, ValidityWindow, utc_timestamp,
+)
 from .db import Database
 
 
 def now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return utc_timestamp(datetime.now(timezone.utc))
 
 
 def content_hash(content: str) -> str:
     return "sha256:" + hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
+def value_digest(content: str) -> str:
+    return content_hash(" ".join(unicodedata.normalize("NFC", content).split()))
+
+
+class RejectedValue(ValueError):
+    """A reviewer rejected this value for this owner."""
+
+
+_ADMITTED = """memories.review_state = 'approved' AND NOT EXISTS (
+    SELECT 1 FROM memory_value_controls vc WHERE vc.owner_id = memories.owner_id
+    AND vc.value_digest = memories.value_digest AND vc.rejected_at IS NOT NULL
+)"""
+_VALIDITY_FIELDS = "v.valid_from, v.valid_until, v.recorded_at AS validity_recorded_at"
+_VALIDITY_JOIN = """LEFT JOIN memory_validity v ON v.memory_id = memories.id AND v.revision = (
+    SELECT MAX(previous.revision) FROM memory_validity previous
+    WHERE previous.memory_id = memories.id AND previous.recorded_at <= ?
+)"""
+_VISIBLE_AT = f"""{_ADMITTED} AND memories.created_at <= ?
+    AND (memories.reviewed_at IS NULL OR memories.reviewed_at <= ?)
+    AND (v.valid_from IS NULL OR v.valid_from <= ?)
+    AND (v.valid_until IS NULL OR v.valid_until > ?)"""
+
+
+def _time_values(valid_at: datetime | None, known_at: datetime | None) -> tuple[str, ...]:
+    current = now()
+    recorded = utc_timestamp(known_at) if known_at is not None else current
+    valid = utc_timestamp(valid_at) if valid_at is not None else current
+    return (recorded, recorded, recorded, valid, valid)
 
 # Truth Layer statuses a catalog or search offers unless the caller asks otherwise: everything but a
 # memory the evidence rejected. TruthStatus in models.py lists all four.
@@ -36,6 +68,8 @@ class MemoryStore:
 
     def _migrate(self) -> None:
         with self.connection:
+            if self.connection.is_postgres:
+                self.connection.execute("SELECT pg_advisory_xact_lock(8840113083)")
             self.connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS actor_proof_nonces_v2 (
@@ -83,6 +117,31 @@ class MemoryStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_memory_grant_events_memory
                 ON memory_grant_events(memory_id, occurred_at, id);
+                CREATE TABLE IF NOT EXISTS memory_value_controls (
+                    owner_id TEXT NOT NULL,
+                    value_digest TEXT NOT NULL,
+                    rejected_at TEXT,
+                    rejected_by TEXT,
+                    decision_memory_id TEXT,
+                    PRIMARY KEY (owner_id, value_digest)
+                );
+                CREATE TABLE IF NOT EXISTS memory_review_events (
+                    memory_id TEXT NOT NULL REFERENCES memories(id),
+                    decision TEXT NOT NULL CHECK (decision IN ('approved','rejected')),
+                    reviewer TEXT NOT NULL,
+                    recorded_at TEXT NOT NULL,
+                    PRIMARY KEY (memory_id, decision)
+                );
+                CREATE TABLE IF NOT EXISTS memory_validity (
+                    memory_id TEXT NOT NULL REFERENCES memories(id),
+                    revision INTEGER NOT NULL,
+                    valid_from TEXT,
+                    valid_until TEXT,
+                    recorded_at TEXT NOT NULL,
+                    recorded_by TEXT NOT NULL,
+                    CHECK (valid_from IS NULL OR valid_until IS NULL OR valid_from < valid_until),
+                    PRIMARY KEY (memory_id, revision)
+                );
                 CREATE TABLE IF NOT EXISTS ratings (
                     memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
                     actor_id TEXT NOT NULL,
@@ -134,30 +193,143 @@ class MemoryStore:
                 );
                 """
             )
-            if self.connection.is_postgres:
-                columns = {
-                    row["column_name"] for row in self.connection.execute(
-                        "SELECT column_name FROM information_schema.columns WHERE table_name = 'payment_orders'"
-                    )
-                }
-            else:
-                columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(payment_orders)")}
-            if "paid_block_hash" not in columns:
+            if not self.connection.is_postgres:
+                # sqlite3.executescript commits first; serialize the following schema changes.
+                self.connection.execute("BEGIN IMMEDIATE")
+            if "paid_block_hash" not in self._columns("payment_orders"):
                 self.connection.execute("ALTER TABLE payment_orders ADD COLUMN paid_block_hash TEXT")
+            columns = self._columns("memories")
+            if "review_state" not in columns:
+                self.connection.execute("ALTER TABLE memories ADD COLUMN review_state TEXT NOT NULL DEFAULT 'approved' "
+                                        "CHECK (review_state IN ('pending','approved','rejected'))")
+            if "reviewed_at" not in columns:
+                self.connection.execute("ALTER TABLE memories ADD COLUMN reviewed_at TEXT")
+            if "value_digest" not in columns:
+                self.connection.execute("ALTER TABLE memories ADD COLUMN value_digest TEXT")
+            self.connection.execute("CREATE INDEX IF NOT EXISTS idx_memories_without_value "
+                                    "ON memories(id) WHERE value_digest IS NULL")
+            while rows := self.connection.execute(
+                "SELECT id, content FROM memories WHERE value_digest IS NULL ORDER BY id LIMIT 200"
+            ).fetchall():
+                for row in rows:
+                    self.connection.execute("UPDATE memories SET value_digest = ? WHERE id = ?",
+                                            (value_digest(row["content"]), row["id"]))
+            self.connection.execute("CREATE INDEX IF NOT EXISTS idx_memories_review_queue "
+                                    "ON memories(created_at, id) WHERE review_state = 'pending'")
+
+    def _columns(self, table: str) -> set[str]:
+        if self.connection.is_postgres:
+            return {row["column_name"] for row in self.connection.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = current_schema() AND table_name = ?", (table,))}
+        return {row["name"] for row in self.connection.execute(f"PRAGMA table_info({table})")}
 
     def create(self, request: MemoryCreate, owner_id: str) -> MemoryUnit:
+        """Submit a unit for operator review."""
         memory_id = "mem_" + uuid4().hex[:24]
-        created_at = now()
-        with self.connection:
+        digest = value_digest(request.content)
+        with self.lock, self.connection:
+            if self._lock_value(owner_id, digest)["rejected_at"] is not None:
+                raise RejectedValue("this value was rejected for this owner")
+            created_at = now()
             self.connection.execute(
                 """INSERT INTO memories (
                 id, title, content, content_hash, owner_id, tags, visibility, price_usdc,
-                source_refs, parent_memory_ids, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                source_refs, parent_memory_ids, created_at, updated_at, value_digest, review_state
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')""",
                 (memory_id, request.title, request.content, content_hash(request.content), owner_id,
                  json.dumps(request.tags), request.visibility, request.price_usdc,
-                 json.dumps(request.source_refs), json.dumps(request.parent_memory_ids), created_at, created_at),
+                 json.dumps(request.source_refs), json.dumps(request.parent_memory_ids), created_at, created_at,
+                 digest),
             )
+            self._insert_validity(memory_id, request, 1, created_at, owner_id)
+        return self.get_unchecked(memory_id)
+
+    def _lock_value(self, owner_id: str, digest: str):
+        self.connection.execute(
+            "INSERT INTO memory_value_controls (owner_id, value_digest) VALUES (?, ?) "
+            "ON CONFLICT (owner_id, value_digest) DO NOTHING", (owner_id, digest),
+        )
+        lock = " FOR UPDATE" if self.connection.is_postgres else ""
+        return self.connection.execute(
+            "SELECT rejected_at FROM memory_value_controls WHERE owner_id = ? AND value_digest = ?" + lock,
+            (owner_id, digest),
+        ).fetchone()
+
+    def pending_reviews(self, limit: int = 30, offset: int = 0) -> list[dict]:
+        rows = self.connection.execute(
+            """SELECT id, title, owner_id, created_at FROM memories WHERE review_state = 'pending'
+               AND NOT EXISTS (SELECT 1 FROM memory_value_controls vc WHERE vc.owner_id = memories.owner_id
+               AND vc.value_digest = memories.value_digest AND vc.rejected_at IS NOT NULL)
+               ORDER BY created_at, id LIMIT ? OFFSET ?""", (limit, offset),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def review(self, memory_id: str, decision: str, reviewer: str) -> MemoryUnit:
+        if decision not in {"approved", "rejected"} or not reviewer.strip():
+            raise ValueError("a review requires an approval or rejection and a reviewer")
+        with self.lock, self.connection:
+            row = self.connection.execute("SELECT owner_id, value_digest FROM memories WHERE id = ?",
+                                          (memory_id,)).fetchone()
+            if row is None:
+                raise KeyError(memory_id)
+            if reviewer == row["owner_id"]:
+                raise PermissionError("the producer cannot review its own memory")
+            control = self._lock_value(row["owner_id"], row["value_digest"])
+            if decision == "approved" and control["rejected_at"] is not None:
+                raise RejectedValue("this value was rejected for this owner")
+            recorded_at = now()
+            changed = self.connection.execute(
+                "UPDATE memories SET review_state = ?, reviewed_at = ?, updated_at = ? "
+                "WHERE id = ? AND review_state NOT IN (?, 'rejected')",
+                (decision, recorded_at, recorded_at, memory_id, decision),
+            ).rowcount
+            if changed:
+                self.connection.execute(
+                    "INSERT INTO memory_review_events (memory_id, decision, reviewer, recorded_at) VALUES (?, ?, ?, ?)",
+                    (memory_id, decision, reviewer, recorded_at),
+                )
+                if decision == "rejected":
+                    self.connection.execute(
+                        "UPDATE memory_value_controls SET rejected_at = ?, rejected_by = ?, decision_memory_id = ? "
+                        "WHERE owner_id = ? AND value_digest = ? AND rejected_at IS NULL",
+                        (recorded_at, reviewer, memory_id, row["owner_id"], row["value_digest"]),
+                    )
+        return self.get_unchecked(memory_id)
+
+    def _insert_validity(self, memory_id: str, window: ValidityWindow, revision: int,
+                         recorded_at: str, recorded_by: str) -> None:
+        start = utc_timestamp(window.valid_from) if window.valid_from is not None else None
+        end = utc_timestamp(window.valid_until) if window.valid_until is not None else None
+        self.connection.execute(
+            "INSERT INTO memory_validity (memory_id, revision, valid_from, valid_until, recorded_at, recorded_by) "
+            "VALUES (?, ?, ?, ?, ?, ?)", (memory_id, revision, start, end, recorded_at, recorded_by),
+        )
+
+    def correct_validity(self, memory_id: str, window: ValidityWindow, reviewer: str) -> MemoryUnit:
+        with self.lock, self.connection:
+            row = self.connection.execute("SELECT owner_id, value_digest FROM memories WHERE id = ?",
+                                          (memory_id,)).fetchone()
+            if row is None:
+                raise KeyError(memory_id)
+            if reviewer == row["owner_id"]:
+                raise PermissionError("the producer cannot correct its own memory")
+            control = self._lock_value(row["owner_id"], row["value_digest"])
+            if control["rejected_at"] is not None:
+                raise RejectedValue("this value was rejected for this owner")
+            current = self.get_unchecked(memory_id)
+            if current.review_state != "approved":
+                raise ValueError("approve the memory before correcting its validity")
+            if (current.validity is not None and window.valid_from == current.validity.valid_from
+                    and window.valid_until == current.validity.valid_until):
+                return current
+            latest = self.connection.execute(
+                "SELECT COALESCE(MAX(revision), 0) AS revision FROM memory_validity WHERE memory_id = ?", (memory_id,)
+            ).fetchone()["revision"]
+            if latest == 0:
+                self._insert_validity(memory_id, ValidityWindow(), 1, current.created_at, current.owner_id)
+                latest = 1
+            self._insert_validity(memory_id, window, latest + 1, now(), reviewer)
         return self.get_unchecked(memory_id)
 
     def _rating(self, memory_id: str) -> tuple[float | None, int]:
@@ -168,6 +340,10 @@ class MemoryStore:
 
     def _unit(self, row: sqlite3.Row) -> MemoryUnit:
         average, count = self._rating(row["id"])
+        validity = None
+        if "validity_recorded_at" in row.keys() and row["validity_recorded_at"] is not None:
+            validity = ValidityVersion(valid_from=row["valid_from"], valid_until=row["valid_until"],
+                                       recorded_at=row["validity_recorded_at"])
         return MemoryUnit(
             id=row["id"], title=row["title"], content=row["content"], content_hash=row["content_hash"],
             owner_id=row["owner_id"], tags=json.loads(row["tags"]), visibility=row["visibility"],
@@ -176,6 +352,7 @@ class MemoryStore:
             truth=TruthState(status=row["truth_status"], confidence=row["truth_confidence"], evidence_pack_id=row["evidence_pack_id"]),
             provenance=ProvenanceState(status=row["provenance_status"], receipt_id=row["receipt_id"], lineage_root=row["lineage_root"]),
             average_score=average, score_count=count, created_at=row["created_at"], updated_at=row["updated_at"],
+            review_state=row["review_state"], validity=validity,
         )
 
     @staticmethod
@@ -183,7 +360,20 @@ class MemoryStore:
         return MemorySummary(**unit.model_dump(exclude={"content", "source_refs", "parent_memory_ids"}))
 
     def get_unchecked(self, memory_id: str) -> MemoryUnit:
-        row = self.connection.execute("SELECT * FROM memories WHERE id = ?", (memory_id,)).fetchone()
+        row = self.connection.execute(
+            f"SELECT memories.*, {_VALIDITY_FIELDS} FROM memories {_VALIDITY_JOIN} WHERE memories.id = ?",
+            (now(), memory_id),
+        ).fetchone()
+        if row is None:
+            raise KeyError(memory_id)
+        return self._unit(row)
+
+    def get_available(self, memory_id: str, *, valid_at: datetime | None = None,
+                      known_at: datetime | None = None) -> MemoryUnit:
+        row = self.connection.execute(
+            f"SELECT memories.*, {_VALIDITY_FIELDS} FROM memories {_VALIDITY_JOIN} "
+            f"WHERE {_VISIBLE_AT} AND memories.id = ?", (*_time_values(valid_at, known_at), memory_id),
+        ).fetchone()
         if row is None:
             raise KeyError(memory_id)
         return self._unit(row)
@@ -237,6 +427,13 @@ class MemoryStore:
 
     def insert_payment_order(self, values: tuple[object, ...]) -> None:
         with self.lock, self.connection:
+            memory_id = values[1]
+            row = self.connection.execute("SELECT owner_id, value_digest FROM memories WHERE id = ?",
+                                          (memory_id,)).fetchone()
+            if row is None:
+                raise KeyError(memory_id)
+            self._lock_value(row["owner_id"], row["value_digest"])
+            self.get_available(memory_id)
             self.connection.execute(
                 """INSERT INTO payment_orders (
                 order_id, memory_id, grantee_id, price_usdc, amount_usdc, amount_raw,
@@ -330,6 +527,9 @@ class MemoryStore:
                 )
 
     def can_read(self, unit: MemoryUnit, actor_id: str | None, team_id: str | None = None) -> bool:
+        if not self.connection.execute(f"SELECT 1 FROM memories WHERE id = ? AND {_ADMITTED}",
+                                       (unit.id,)).fetchone():
+            return False
         if team_id and f"team:{team_id}" in unit.tags and unit.visibility in {"shared", "public", "paid"}:
             return True
         if unit.visibility == "public":
@@ -339,11 +539,12 @@ class MemoryStore:
         return actor_id == unit.owner_id or self.has_grant(unit.id, actor_id)
 
     def catalog(self, query: str, actor_id: str | None, limit: int, offset: int, team_id: str | None = None,
-                truth: tuple[str, ...] | None = DEFAULT_TRUTH) -> tuple[list[MemorySummary], int]:
+                truth: tuple[str, ...] | None = DEFAULT_TRUTH, *, valid_at: datetime | None = None,
+                known_at: datetime | None = None) -> tuple[list[MemorySummary], int]:
         """Discoverable memories, newest first. ``truth`` keeps only those whose Truth Layer status is
         listed; by default a memory the evidence rejected is not offered as an answer (it can still be
         read by id, with its status). ``None`` applies no truth filter."""
-        params: list[object] = []
+        params: list[object] = list(_time_values(valid_at, known_at))
         access = "(visibility IN ('public','paid'))"
         team_tag = None
         if team_id:
@@ -374,9 +575,10 @@ class MemoryStore:
         if truth is not None:
             search += (" AND truth_status IN (" + ",".join("?" * len(truth)) + ")") if truth else " AND 1=0"
             params.extend(truth)
-        count = self.connection.execute(f"SELECT COUNT(*) count FROM memories WHERE {access}{search}", params).fetchone()["count"]
+        selection = f"FROM memories {_VALIDITY_JOIN} WHERE {_VISIBLE_AT} AND {access}{search}"
+        count = self.connection.execute(f"SELECT COUNT(*) count {selection}", params).fetchone()["count"]
         rows = self.connection.execute(
-            f"SELECT * FROM memories WHERE {access}{search} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            f"SELECT memories.*, {_VALIDITY_FIELDS} {selection} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
             [*params, limit, offset],
         ).fetchall()
         return [self.listing(self._unit(row), actor_id, team_id) for row in rows], count
@@ -391,7 +593,7 @@ class MemoryStore:
         return summary
 
     def grant(self, memory_id: str, grantee_id: str, actor_id: str) -> Grant:
-        unit = self.get_unchecked(memory_id)
+        unit = self.get_available(memory_id)
         if unit.owner_id != actor_id:
             raise PermissionError("only the owner can grant access")
         grant_id = "grant_" + uuid4().hex[:24]
@@ -442,7 +644,7 @@ class MemoryStore:
         )
 
     def score(self, memory_id: str, actor_id: str, score: int) -> ScoreResult:
-        self.get_unchecked(memory_id)
+        self.get_available(memory_id)
         timestamp = now()
         with self.connection:
             self.connection.execute(
@@ -468,7 +670,7 @@ class MemoryStore:
     def unattested(self, limit: int = 200, after_id: str = "") -> list[MemoryUnit]:
         """Units the ledger never confirmed (``provenance_status='unattested'``), oldest id first."""
         rows = self.connection.execute(
-            "SELECT * FROM memories WHERE provenance_status='unattested' AND id > ? ORDER BY id LIMIT ?",
+            f"SELECT * FROM memories WHERE provenance_status='unattested' AND {_ADMITTED} AND id > ? ORDER BY id LIMIT ?",
             (after_id, limit),
         ).fetchall()
         return [self._unit(row) for row in rows]
@@ -491,11 +693,11 @@ class MemoryStore:
     def stats(self, actor_id: str | None, payment_enabled: bool) -> HubStats:
         _, discoverable = self.catalog("", actor_id, 1, 0)
         row = self.connection.execute(
-            """SELECT
+            f"""SELECT
             SUM(CASE WHEN provenance_status='attested' THEN 1 ELSE 0 END) attested,
             SUM(CASE WHEN truth_status!='unverified' THEN 1 ELSE 0 END) verified,
             SUM(CASE WHEN visibility='paid' THEN 1 ELSE 0 END) paid
-            FROM memories"""
+            FROM memories WHERE {_ADMITTED}"""
         ).fetchone()
         return HubStats(
             discoverable_memories=discoverable, attested_memories=row["attested"] or 0,

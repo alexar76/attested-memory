@@ -28,6 +28,12 @@ class MemoryBody(BaseModel):
     price_usdc: str | None = None
     source_refs: list[str] = Field(default_factory=list, max_length=50)
     parent_memory_ids: list[str] = Field(default_factory=list, max_length=50)
+    valid_from: str | None = None
+    valid_until: str | None = None
+
+
+def _time_query(valid_at: str | None, known_at: str | None) -> dict[str, str]:
+    return {key: value for key, value in {"valid_at": valid_at, "known_at": known_at}.items() if value is not None}
 
 
 def _headers(request: Request) -> dict[str, str]:
@@ -69,8 +75,9 @@ def health() -> dict[str, str]:
 
 
 @app.get("/api/search")
-def search(request: Request, q: str = Query(default="", max_length=200), limit: int = Query(default=30, ge=1, le=100)) -> Any:
-    return _call("GET", "/v1/catalog?" + urlencode({"q": q, "limit": limit}), request)
+def search(request: Request, q: str = Query(default="", max_length=200), limit: int = Query(default=30, ge=1, le=100),
+           valid_at: str | None = None, known_at: str | None = None) -> Any:
+    return _call("GET", "/v1/catalog?" + urlencode({"q": q, "limit": limit, **_time_query(valid_at, known_at)}), request)
 
 
 @app.post("/api/memories", status_code=201)
@@ -79,8 +86,9 @@ def write(body: MemoryBody, request: Request) -> Any:
 
 
 @app.get("/api/memories/{memory_id}")
-def read(memory_id: str, request: Request) -> Any:
-    return _call("GET", f"/v1/memories/{memory_id}", request)
+def read(memory_id: str, request: Request, valid_at: str | None = None, known_at: str | None = None) -> Any:
+    query = urlencode(_time_query(valid_at, known_at))
+    return _call("GET", f"/v1/memories/{quote(memory_id, safe='')}" + (f"?{query}" if query else ""), request)
 
 
 @app.get("/api/memories/{memory_id}/evidence-pack")

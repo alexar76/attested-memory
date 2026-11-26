@@ -46,6 +46,8 @@ def test_private_memory_belongs_to_the_named_buyer_only(market):
     unit = _invoke("memory.write@v1", {"title": "wzhik note", "content": "stars fell again",
                                        "visibility": "private"}, _as(ALICE))
     assert unit["owner_id"] == "aimarket:" + ALICE
+    assert unit["review_state"] == "pending"
+    market.review(unit["id"], "approved", "operator:fixture")
     assert _invoke("memory.read@v1", {"memory_id": unit["id"]}, _as(ALICE))["id"] == unit["id"]
     found = _invoke("memory.search@v1", {"query": "stars"}, _as(ALICE))
     assert [item["id"] for item in found["items"]] == [unit["id"]]
@@ -73,8 +75,8 @@ def test_anonymous_callers_cannot_write_share_or_score(market):
             assert denied.value.status_code == 403, (capability_id, headers)
 
 
-def test_public_memories_stay_readable_without_a_buyer(market):
-    public = market.create(MemoryCreate(title="public incident", content="open",
+def test_public_memories_stay_readable_without_a_buyer(approved_memory, market):
+    public = approved_memory(market, MemoryCreate(title="public incident", content="open",
                                         visibility="public"), "someone")
     assert _invoke("memory.read@v1", {"memory_id": public.id})["id"] == public.id
     assert [i["id"] for i in _invoke("memory.search@v1", {"query": "incident"})["items"]] == [public.id]
@@ -82,5 +84,6 @@ def test_public_memories_stay_readable_without_a_buyer(market):
 
 def test_owner_can_share_with_another_named_buyer(market):
     unit = _invoke("memory.write@v1", {"title": "handoff", "content": "for bob"}, _as(ALICE))
+    market.review(unit["id"], "approved", "operator:fixture")
     _invoke("memory.share@v1", {"memory_id": unit["id"], "grantee_id": "aimarket:" + BOB}, _as(ALICE))
     assert _invoke("memory.read@v1", {"memory_id": unit["id"]}, _as(BOB))["id"] == unit["id"]

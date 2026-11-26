@@ -13,8 +13,11 @@ the Hub namespace.
 ## Memory
 
 - `POST /api/team-memories` with `team_id`, `title`, `content`, `tags` and
-  optional `source_refs`;
+  optional `source_refs`, `valid_from` and `valid_until`. The response carries
+  `review_state: "pending"` until the Memory Market operator approves the submission;
 - `GET /api/team-search?team_id=...&q=...`;
 - `GET /api/team-memories/{memory_id}?team_id=...`.
 
-Membership never replaces cryptographic actor identity.
+Search and read accept timezone-aware RFC 3339 `valid_at` and `known_at`. Include
+the parameters in the signed Market destination. Membership never replaces
+cryptographic actor identity or operator approval.

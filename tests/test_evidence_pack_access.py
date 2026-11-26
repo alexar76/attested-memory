@@ -13,7 +13,7 @@ from truth_layer.models import VerifyRequest
 from truth_layer.store import TruthStore
 
 
-def test_hub_evidence_pack_respects_current_memory_readers(tmp_path, monkeypatch):
+def test_hub_evidence_pack_respects_current_memory_readers(approved_memory, tmp_path, monkeypatch):
     market = MemoryStore(str(tmp_path / "market.sqlite3"))
     truth = TruthStore(str(tmp_path / "truth.sqlite3"))
     buyer = "bref-" + "a" * 32
@@ -36,8 +36,8 @@ def test_hub_evidence_pack_respects_current_memory_readers(tmp_path, monkeypatch
         return market_client.get(httpx.URL(url).path, headers=headers)
 
     monkeypatch.setattr(truth_app.httpx, "get", routed_get)
-    unit = market.create(MemoryCreate(title="private note", content="reviewed claim"), owner)
-    public = market.create(MemoryCreate(title="public note", content="public claim", visibility="public"), owner)
+    unit = approved_memory(market, MemoryCreate(title="private note", content="reviewed claim"), owner)
+    public = approved_memory(market, MemoryCreate(title="public note", content="public claim", visibility="public"), owner)
     private_pack, public_pack, standalone = [
         verify(VerifyRequest(memory_id=memory_id, claim=claim))
         for memory_id, claim in ((unit.id, unit.content), (public.id, public.content), (None, "standalone claim"))

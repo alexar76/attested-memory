@@ -4,7 +4,8 @@
     client = Client(actor)
     client.start_trial()                      # 7-day personal key, bound to this actor
     unit = client.write("Supplier terms", "Net 30, EUR, signed 2026-09-01", tags=["finance"])
-    client.read(unit["id"])                   # content checked against its content_hash
+    # After operator approval, read checks the content against its content_hash.
+    client.read(unit["id"])
     client.share(unit["id"], "did:actor:…")   # another actor may read it
     client.revoke(unit["id"], "did:actor:…")  # and no longer may
 """
@@ -83,23 +84,31 @@ class Client:
     # --- memory --------------------------------------------------------------------------
     def write(self, title: str, content: str, *, tags: Iterable[str] = (), visibility: str = "private",
               source_refs: Iterable[str] = (), parent_memory_ids: Iterable[str] = (),
-              price_usdc: str | None = None) -> dict[str, Any]:
+              price_usdc: str | None = None, valid_from: str | None = None,
+              valid_until: str | None = None) -> dict[str, Any]:
+        """Submit a unit for review, optionally with an RFC 3339 validity interval."""
         body = {"title": title, "content": content, "tags": list(tags), "visibility": visibility,
                 "source_refs": list(source_refs), "parent_memory_ids": list(parent_memory_ids),
-                "price_usdc": price_usdc}
+                "price_usdc": price_usdc,
+                **{key: value for key, value in {"valid_from": valid_from, "valid_until": valid_until}.items()
+                   if value is not None}}
         return check_integrity(self._request("POST", "/memory/api/memories", body))
 
-    def read(self, memory_id: str) -> dict[str, Any]:
+    def read(self, memory_id: str, *, valid_at: str | None = None, known_at: str | None = None) -> dict[str, Any]:
+        """Read with optional RFC 3339 fact time and record time."""
         path = "/memory/api/memories/" + urllib.parse.quote(memory_id, safe="")
-        return check_integrity(self._request("GET", path))
+        query = urllib.parse.urlencode(_time_query(valid_at, known_at))
+        return check_integrity(self._request("GET", path + ("?" + query if query else "")))
 
     def read_evidence(self, memory_id: str) -> dict[str, Any]:
         """Read the current evidence pack for a memory you can access."""
         path = "/memory/api/memories/" + urllib.parse.quote(memory_id, safe="") + "/evidence-pack"
         return self._request("GET", path)
 
-    def search(self, query: str = "", limit: int = 30) -> dict[str, Any]:
-        params = urllib.parse.urlencode({"q": query, "limit": max(1, min(int(limit), 100))})
+    def search(self, query: str = "", limit: int = 30, *, valid_at: str | None = None,
+               known_at: str | None = None) -> dict[str, Any]:
+        params = urllib.parse.urlencode({"q": query, "limit": max(1, min(int(limit), 100)),
+                                        **_time_query(valid_at, known_at)})
         return self._request("GET", "/memory/api/search?" + params)
 
     # --- access --------------------------------------------------------------------------
@@ -147,6 +156,10 @@ class Client:
         except (urllib.error.URLError, TimeoutError, OSError) as error:
             raise AttestedMemoryError(0, f"cannot reach {self.base_url}: {error}") from None
         return json.loads(raw) if raw else {}
+
+
+def _time_query(valid_at: str | None, known_at: str | None) -> dict[str, str]:
+    return {key: value for key, value in {"valid_at": valid_at, "known_at": known_at}.items() if value is not None}
 
 
 def _detail(raw: bytes) -> str:

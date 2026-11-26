@@ -53,9 +53,10 @@ class FakeBase:
         }
 
 
-def desk(tmp_path):
+@pytest.fixture
+def desk(approved_memory, tmp_path):
     store = MemoryStore(str(tmp_path / "market.sqlite3"))
-    memory = store.create(MemoryCreate(
+    memory = approved_memory(store, MemoryCreate(
         title="Paid field note", content="Evidence that is licensed per read.",
         visibility="paid", price_usdc="2.50",
     ), "agent:publisher")
@@ -69,8 +70,8 @@ def desk(tmp_path):
     return store, memory, chain, PaymentDesk(store, settings, rpc=chain)
 
 
-def test_exact_finalized_payment_grants_memory_access(tmp_path):
-    store, memory, chain, payments = desk(tmp_path)
+def test_exact_finalized_payment_grants_memory_access(desk):
+    store, memory, chain, payments = desk
     order = payments.create(memory.id, "agent:buyer")
     assert order.amount_usdc.startswith("2.50")
     assert int(order.amount_raw) > 2_500_000
@@ -88,8 +89,8 @@ def test_exact_finalized_payment_grants_memory_access(tmp_path):
     assert store.can_read(memory, "agent:buyer") is True
 
 
-def test_scanner_settles_only_matching_transfer(tmp_path):
-    store, memory, chain, payments = desk(tmp_path)
+def test_scanner_settles_only_matching_transfer(desk):
+    store, memory, chain, payments = desk
     order = payments.create(memory.id, "agent:scanner")
     chain.pay(int(order.amount_raw), block=101)
     chain.head = 105
@@ -98,8 +99,8 @@ def test_scanner_settles_only_matching_transfer(tmp_path):
     assert store.has_grant(memory.id, "agent:scanner") is True
 
 
-def test_wrong_amount_never_grants_access(tmp_path):
-    store, memory, chain, payments = desk(tmp_path)
+def test_wrong_amount_never_grants_access(desk):
+    store, memory, chain, payments = desk
     order = payments.create(memory.id, "agent:no-access")
     chain.pay(int(order.amount_raw) - 1)
     chain.head = 104
@@ -108,8 +109,8 @@ def test_wrong_amount_never_grants_access(tmp_path):
     assert store.has_grant(memory.id, "agent:no-access") is False
 
 
-def test_transfer_from_before_order_is_rejected(tmp_path):
-    store, memory, chain, payments = desk(tmp_path)
+def test_transfer_from_before_order_is_rejected(desk):
+    store, memory, chain, payments = desk
     order = payments.create(memory.id, "agent:old-transfer")
     chain.pay(int(order.amount_raw), block=99)
     chain.head = 103
@@ -118,8 +119,8 @@ def test_transfer_from_before_order_is_rejected(tmp_path):
     assert store.has_grant(memory.id, "agent:old-transfer") is False
 
 
-def test_late_transfer_inside_grace_window_is_settled(tmp_path):
-    store, memory, chain, payments = desk(tmp_path)
+def test_late_transfer_inside_grace_window_is_settled(desk):
+    store, memory, chain, payments = desk
     order = payments.create(memory.id, "agent:late")
     current = int(datetime.now(timezone.utc).timestamp())
     with store.connection:
@@ -136,8 +137,8 @@ def test_late_transfer_inside_grace_window_is_settled(tmp_path):
     assert store.has_grant(memory.id, "agent:late") is True
 
 
-def test_transaction_hash_cannot_unlock_two_orders(tmp_path):
-    store, memory, chain, payments = desk(tmp_path)
+def test_transaction_hash_cannot_unlock_two_orders(desk):
+    store, memory, chain, payments = desk
     first = payments.create(memory.id, "agent:first")
     second = payments.create(memory.id, "agent:second")
     with store.connection:
@@ -153,8 +154,8 @@ def test_transaction_hash_cannot_unlock_two_orders(tmp_path):
     assert store.has_grant(memory.id, "agent:second") is False
 
 
-def test_confirmed_payment_is_revoked_after_block_reorg(tmp_path):
-    store, memory, chain, payments = desk(tmp_path)
+def test_confirmed_payment_is_revoked_after_block_reorg(desk):
+    store, memory, chain, payments = desk
     order = payments.create(memory.id, "agent:reorg")
     chain.pay(int(order.amount_raw))
     chain.head = 104
@@ -166,6 +167,20 @@ def test_confirmed_payment_is_revoked_after_block_reorg(tmp_path):
 
     assert payments.get(order.order_id).settled is False
     assert store.has_grant(memory.id, "agent:reorg") is False
+
+
+def test_checkout_enforces_operator_admission(desk):
+    store, _, _, payments = desk
+    memory = store.create(MemoryCreate(title="Submitted paid note", content="review first", visibility="paid",
+                                       price_usdc="2.50"), "agent:publisher")
+    with pytest.raises(PaymentError, match="memory not found"):
+        payments.create(memory.id, "agent:buyer")
+    store.review(memory.id, "approved", "operator:fixture")
+    order = payments.create(memory.id, "agent:buyer")
+    store.review(memory.id, "rejected", "operator:fixture")
+    with pytest.raises(PaymentError, match="memory not found"):
+        payments.create(memory.id, "agent:buyer")
+    assert payments.get(order.order_id).state == "pending"
 
 
 def test_every_rpc_failover_is_bound_to_base_mainnet(monkeypatch):
